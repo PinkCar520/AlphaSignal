@@ -1,0 +1,489 @@
+"""
+SSE (Server-Sent Events) endpoint for real-time intelligence updates.
+
+This module provides a streaming endpoint that pushes new intelligence data
+to connected clients as soon as it's written to the database.
+"""
+
+# ... imports remaining the same ...
+import asyncio
+import json
+from typing import List, AsyncGenerator
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from contextlib import asynccontextmanager
+from src.alphasignal.config import settings
+
+# --- Broadcast System ---
+
+class ConnectionManager:
+    """Manages active SSE connections and broadcasts messages"""
+    def __init__(self):
+        self.active_connections: List[asyncio.Queue] = []
+
+    async def connect(self) -> asyncio.Queue:
+        queue = asyncio.Queue()
+        self.active_connections.append(queue)
+        print(f"[SSE] Client connected. Active: {len(self.active_connections)}")
+        return queue
+
+    def disconnect(self, queue: asyncio.Queue):
+        if queue in self.active_connections:
+            self.active_connections.remove(queue)
+            print(f"[SSE] Client disconnected. Active: {len(self.active_connections)}")
+
+    async def broadcast(self, message: str):
+        """Push message to all active queues"""
+        for queue in self.active_connections:
+            await queue.put(message)
+
+manager = ConnectionManager()
+# Global tracker for the broadcasting thread
+global_last_id = 0
+
+async def database_poller():
+    """
+    Background task:
+    Solely responsible for polling the DB and broadcasting updates.
+    Runs once, regardless of client count.
+    """
+    global global_last_id
+    
+    # 1. Init: Find the current max ID to start polling from
+    # We don't want to broadcast old history to everyone on startup
+    try:
+        conn = psycopg2.connect(
+            host=settings.POSTGRES_HOST,
+            port=settings.POSTGRES_PORT,
+            user=settings.POSTGRES_USER,
+            password=settings.POSTGRES_PASSWORD,
+            dbname=settings.POSTGRES_DB
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT COALESCE(MAX(id), 0) FROM intelligence")
+        global_last_id = cursor.fetchone()[0]
+        conn.close()
+        print(f"[Broadcaster] Started monitoring from ID: {global_last_id}")
+    except Exception as e:
+        print(f"[Broadcaster] Startup DB error: {e}")
+        return
+
+    # 2. Polling Loop
+    while True:
+        try:
+            # Only poll if there are active clients (Optional optimization)
+            # if not manager.active_connections:
+            #     await asyncio.sleep(2)
+            #     continue
+
+            conn = psycopg2.connect(
+                 host=settings.POSTGRES_HOST,
+                 port=settings.POSTGRES_PORT,
+                 user=settings.POSTGRES_USER,
+                 password=settings.POSTGRES_PASSWORD,
+                 dbname=settings.POSTGRES_DB
+            )
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cursor.execute(
+                "SELECT * FROM intelligence WHERE id > %s ORDER BY id ASC LIMIT 50",
+                (global_last_id,)
+            )
+            new_items = cursor.fetchall()
+            conn.close()
+
+            if new_items:
+                items_data = [dict(row) for row in new_items]
+                global_last_id = new_items[-1]['id']
+                
+                event_data = {
+                    'type': 'intelligence_update',
+                    'data': items_data,
+                    'count': len(items_data),
+                    'latest_id': global_last_id
+                }
+                msg = f"data: {json.dumps(event_data, default=str)}\n\n"
+                
+                await manager.broadcast(msg)
+                print(f"[Broadcaster] Broadcasted {len(items_data)} new items")
+
+        except Exception as e:
+            print(f"[Broadcaster] Error: {e}")
+
+        await asyncio.sleep(2)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    task = asyncio.create_task(database_poller())
+    yield
+    # Shutdown
+    task.cancel()
+
+app = FastAPI(lifespan=lifespan)
+
+# --- Endpoints ---
+
+
+
+@app.get("/api/stats")
+async def get_backtest_stats(request: Request):
+    """
+    Calculate backtest statistics on the SERVER side using the full database history.
+    Supports window='1h' or window='24h'.
+    Now includes session-level breakdown and trading hygiene filters (Clustering/Exhaustion).
+    """
+    window = request.query_params.get('window', '1h')
+    
+    try:
+        conn = psycopg2.connect(
+            host=settings.POSTGRES_HOST,
+            port=settings.POSTGRES_PORT,
+            user=settings.POSTGRES_USER,
+            password=settings.POSTGRES_PASSWORD,
+            dbname=settings.POSTGRES_DB
+        )
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Determine columns based on window
+        outcome_col = "price_1h" if window == "1h" else "price_24h"
+        
+        keywords = "鹰|利空|下跌|风险|Bearish|Hawkish|Risk|Negative"
+        
+        # 1. Global Stats (Raw)
+        query_global = f"""
+        WITH qualified_events AS (
+            SELECT 
+                gold_price_snapshot as entry,
+                {outcome_col} as exit,
+                clustering_score,
+                exhaustion_score,
+                dxy_snapshot,
+                us10y_snapshot,
+                gvz_snapshot
+            FROM intelligence 
+            WHERE 
+                urgency_score >= 8 
+                AND (sentiment::text ~* %(keywords)s)
+                AND gold_price_snapshot IS NOT NULL 
+                AND {outcome_col} IS NOT NULL
+        )
+        SELECT 
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins,
+            AVG((exit - entry) / entry) * 100 as avg_change_pct,
+            AVG(clustering_score) as avg_clustering,
+            AVG(exhaustion_score) as avg_exhaustion,
+            
+            -- Correlation Stats
+            AVG(dxy_snapshot) as avg_dxy,
+            AVG(us10y_snapshot) as avg_us10y,
+            AVG(gvz_snapshot) as avg_gvz,
+            
+            -- Adjusted Win Rate: Exclude noise
+            COUNT(CASE WHEN exit < entry AND clustering_score <= 3 AND exhaustion_score <= 5 THEN 1 END)::float / 
+            NULLIF(COUNT(CASE WHEN clustering_score <= 3 AND exhaustion_score <= 5 THEN 1 END), 0) * 100 as adj_win_rate
+        FROM qualified_events;
+        """
+        
+        # 2. Session Stats
+        query_session = f"""
+        WITH qualified_events AS (
+            SELECT 
+                market_session,
+                gold_price_snapshot as entry,
+                {outcome_col} as exit
+            FROM intelligence 
+            WHERE 
+                urgency_score >= 8 
+                AND (sentiment::text ~* %(keywords)s)
+                AND gold_price_snapshot IS NOT NULL 
+                AND {outcome_col} IS NOT NULL
+                AND market_session IS NOT NULL
+        )
+        SELECT 
+            market_session,
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins,
+            AVG((exit - entry) / entry) * 100 as avg_change_pct
+        FROM qualified_events
+        GROUP BY market_session;
+        """
+
+        # 3. Correlation Breakdown (DXY sensitivity)
+        query_correlation = f"""
+        WITH stats AS (SELECT AVG(dxy_snapshot) as mid FROM intelligence WHERE dxy_snapshot IS NOT NULL),
+        qualified AS (
+            SELECT 
+                gold_price_snapshot as entry,
+                {outcome_col} as exit,
+                dxy_snapshot
+            FROM intelligence, stats
+            WHERE urgency_score >= 8 AND (sentiment::text ~* %(keywords)s)
+            AND gold_price_snapshot IS NOT NULL AND {outcome_col} IS NOT NULL AND dxy_snapshot IS NOT NULL
+        )
+        SELECT 
+            CASE WHEN dxy_snapshot > (SELECT mid FROM stats) THEN 'DXY_STRONG' ELSE 'DXY_WEAK' END as env,
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins
+        FROM qualified
+        GROUP BY env;
+        """
+
+        # 4. Positioning Overhang (COT)
+        # We find the nearest COT indicator for each intelligence record
+        query_positioning = f"""
+        WITH qualified AS (
+            SELECT 
+                i.gold_price_snapshot as entry,
+                i.{outcome_col} as exit,
+                (SELECT percentile FROM market_indicators 
+                 WHERE indicator_name = 'COT_GOLD_NET' AND timestamp <= i.timestamp 
+                 ORDER BY timestamp DESC LIMIT 1) as cot_pct
+            FROM intelligence i
+            WHERE i.urgency_score >= 8 AND (i.sentiment::text ~* %(keywords)s)
+            AND i.gold_price_snapshot IS NOT NULL AND i.{outcome_col} IS NOT NULL
+        )
+        SELECT 
+            CASE 
+                WHEN cot_pct >= 85 THEN 'OVERCROWDED_LONG'
+                WHEN cot_pct <= 15 THEN 'OVERCROWDED_SHORT'
+                ELSE 'NEUTRAL_POSITION'
+            END as env,
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins
+        FROM qualified
+        WHERE cot_pct IS NOT NULL
+        GROUP BY env;
+        """
+
+        # 5. Volatility Regime (GVZ)
+        query_volatility = f"""
+        WITH qualified AS (
+            SELECT 
+                gold_price_snapshot as entry,
+                {outcome_col} as exit,
+                gvz_snapshot
+            FROM intelligence
+            WHERE urgency_score >= 8 AND (sentiment::text ~* %(keywords)s)
+            AND gold_price_snapshot IS NOT NULL AND {outcome_col} IS NOT NULL AND gvz_snapshot IS NOT NULL
+        )
+        SELECT 
+            CASE WHEN gvz_snapshot > 25 THEN 'HIGH_VOL' ELSE 'LOW_VOL' END as env,
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins
+        FROM qualified
+        GROUP BY env;
+        """
+        
+        # 6. Macro Regime (Fed Basis)
+        query_macro = f"""
+        WITH qualified AS (
+            SELECT 
+                i.gold_price_snapshot as entry,
+                i.{outcome_col} as exit,
+                (SELECT value FROM market_indicators 
+                 WHERE indicator_name = 'FED_REGIME' AND timestamp <= i.timestamp 
+                 ORDER BY timestamp DESC LIMIT 1) as fed_val
+            FROM intelligence i
+            WHERE i.urgency_score >= 8 AND (i.sentiment::text ~* %(keywords)s)
+            AND i.gold_price_snapshot IS NOT NULL AND i.{outcome_col} IS NOT NULL
+        )
+        SELECT 
+            CASE 
+                WHEN fed_val > 0 THEN 'DOVISH_REGIME'
+                WHEN fed_val < 0 THEN 'HAWKISH_REGIME'
+                ELSE 'NEUTRAL_REGIME'
+            END as env,
+            COUNT(*) as count,
+            COUNT(CASE WHEN exit < entry THEN 1 END) as wins
+        FROM qualified
+        GROUP BY env;
+        """
+        
+        cursor.execute(query_global, {'keywords': keywords})
+        res_global = cursor.fetchone()
+        
+        cursor.execute(query_session, {'keywords': keywords})
+        res_sessions = cursor.fetchall()
+
+        cursor.execute(query_correlation, {'keywords': keywords})
+        res_corr = cursor.fetchall()
+
+        cursor.execute(query_positioning, {'keywords': keywords})
+        res_pos = cursor.fetchall()
+
+        cursor.execute(query_volatility, {'keywords': keywords})
+        res_vol = cursor.fetchall()
+
+        cursor.execute(query_macro, {'keywords': keywords})
+        res_macro = cursor.fetchall()
+        
+        conn.close()
+        
+        if not res_global or res_global['count'] == 0:
+            return {"count": 0, "winRate": 0, "avgDrop": 0, "window": window, "sessionStats": []}
+            
+        session_stats = []
+        for s in res_sessions:
+            session_stats.append({
+                "session": s['market_session'],
+                "count": s['count'],
+                "winRate": (s['wins'] / s['count']) * 100 if s['count'] > 0 else 0,
+                "avgDrop": -(s['avg_change_pct'] or 0)
+            })
+
+        correlation_stats = {row['env']: {"count": row['count'], "winRate": (row['wins']/row['count'])*100} for row in res_corr}
+        positioning_stats = {row['env']: {"count": row['count'], "winRate": (row['wins']/row['count'])*100} for row in res_pos}
+        volatility_stats = {row['env']: {"count": row['count'], "winRate": (row['wins']/row['count'])*100} for row in res_vol}
+        macro_stats = {row['env']: {"count": row['count'], "winRate": (row['wins']/row['count'])*100} for row in res_macro}
+
+        return {
+            "count": res_global['count'],
+            "winRate": (res_global['wins'] / res_global['count']) * 100,
+            "adjWinRate": res_global['adj_win_rate'] or 0,
+            "avgDrop": -(res_global['avg_change_pct'] or 0),
+            "hygiene": {
+                "avgClustering": res_global['avg_clustering'] or 0,
+                "avgExhaustion": res_global['avg_exhaustion'] or 0,
+                "avgDxy": res_global['avg_dxy'] or 0,
+                "avgUs10y": res_global['avg_us10y'] or 0,
+                "avgGvz": res_global['avg_gvz'] or 0 if 'avg_gvz' in res_global else 0
+            },
+            "correlation": correlation_stats,
+            "positioning": positioning_stats,
+            "volatility": volatility_stats,
+            "macro": macro_stats,
+            "window": window,
+            "sessionStats": session_stats
+        }
+        
+    except Exception as e:
+        print(f"[API] Stats error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/alerts/24h")
+async def get_24h_alerts_count():
+    """
+    Get the count of high-urgency (score 8+) alerts in the last 24 hours.
+    """
+    try:
+        conn = psycopg2.connect(
+            host=settings.POSTGRES_HOST,
+            port=settings.POSTGRES_PORT,
+            user=settings.POSTGRES_USER,
+            password=settings.POSTGRES_PASSWORD,
+            dbname=settings.POSTGRES_DB
+        )
+        cursor = conn.cursor()
+        
+        query = """
+        SELECT COUNT(*) 
+        FROM intelligence 
+        WHERE urgency_score >= 8 
+        AND timestamp > NOW() - INTERVAL '24 hours'
+        """
+        
+        cursor.execute(query)
+        result = cursor.fetchone()
+        conn.close()
+        
+        return {"count": result[0] if result else 0}
+        
+    except Exception as e:
+        print(f"[API] 24h Alerts error: {e}")
+        return {"error": str(e)}
+
+@app.get("/api/intelligence/stream")
+async def intelligence_stream(request: Request):
+    """
+    SSE Endpoint.
+    1. Fetches initial history (context) for this specific client.
+    2. Subscribes client to global broadcast for future updates.
+    """
+    async def event_generator():
+        # A. Send Connection Ack
+        yield f"data: {json.dumps({'type': 'connected', 'message': 'SSE stream established'})}\n\n"
+        
+        # B. Send Initial Context (History)
+        # This is the ONLY time this client queries the DB directly
+        since_id_param = request.query_params.get('since_id')
+        try:
+            conn = psycopg2.connect(
+                host=settings.POSTGRES_HOST,
+                port=settings.POSTGRES_PORT,
+                user=settings.POSTGRES_USER,
+                password=settings.POSTGRES_PASSWORD,
+                dbname=settings.POSTGRES_DB
+            )
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            if since_id_param:
+                # Resume: fetch everything since provided ID
+                try:
+                    target_id = int(since_id_param)
+                    cursor.execute("SELECT * FROM intelligence WHERE id > %s ORDER BY id ASC LIMIT 50", (target_id,))
+                except ValueError:
+                    cursor.execute("SELECT * FROM intelligence ORDER BY id DESC LIMIT 50")
+            else:
+                # Default: fetch last 50
+                cursor.execute("SELECT * FROM intelligence ORDER BY id DESC LIMIT 50")
+
+            initial_items = cursor.fetchall()
+            conn.close()
+
+            if initial_items:
+                # If we fetched via DESC, reverse to make it ASC
+                if not since_id_param or (since_id_param and 'DESC' in cursor.query.decode()):
+                     # Note: logic above uses ASC for resume, DESC for default.
+                     # Simplified: If fetched by DESC, reverse it.
+                     if not since_id_param:
+                         initial_items.reverse()
+
+                items_data = [dict(row) for row in initial_items]
+                if items_data:
+                    last_id = items_data[-1]['id']
+                    
+                    event_payload = {
+                        'type': 'intelligence_update', 
+                        'data': items_data, 
+                        'count': len(items_data),
+                        'latest_id': last_id
+                    }
+                    yield f"data: {json.dumps(event_payload, default=str)}\n\n"
+        except Exception as e:
+            print(f"[SSE] Initial fetch error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Initial fetch failed'})}\n\n"
+
+        # C. Switch to Broadcast Mode
+        queue = await manager.connect()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                # Wait for new data from global broadcaster
+                data = await queue.get()
+                yield data
+        finally:
+            manager.disconnect(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "AlphaSignal SSE (Broadcast Mode)"}
+
+if __name__ == "__main__":
+    import uvicorn
+    # In raw python execution, lifespan works automatically with uvicorn.run(app)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

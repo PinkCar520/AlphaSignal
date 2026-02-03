@@ -1,0 +1,657 @@
+import json
+import logging
+import yfinance as yf
+from datetime import datetime, timedelta
+import pytz
+from src.alphasignal.config import settings
+from src.alphasignal.core.logger import logger
+
+try:
+    import psycopg2
+    from psycopg2.extras import Json, DictCursor
+except ImportError:
+    logger.error("❌ 'psycopg2-binary' is required for PostgreSQL.")
+    raise
+
+class IntelligenceDB:
+    def __init__(self):
+        """Initialize PostgreSQL Database connection configuration."""
+        # Ensure we are configured for Postgres
+        self.host = settings.POSTGRES_HOST
+        self.port = settings.POSTGRES_PORT
+        self.user = settings.POSTGRES_USER
+        self.password = settings.POSTGRES_PASSWORD
+        self.dbname = settings.POSTGRES_DB
+        
+        self._init_db()
+
+    def _get_conn(self):
+        """Get a fresh PostgreSQL connection."""
+        return psycopg2.connect(
+            host=self.host,
+            port=self.port,
+            user=self.user,
+            password=self.password,
+            dbname=self.dbname
+        )
+
+    def _init_db(self):
+        """Ensure PostgreSQL schema exists."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            # Ensure pg_trgm extension exists for similarity matching
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
+            
+            # Create Table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS intelligence (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    source_id TEXT UNIQUE,
+                    author TEXT,
+                    content TEXT,
+                    
+                    summary JSONB,
+                    sentiment JSONB,
+                    urgency_score INTEGER,
+                    market_implication JSONB,
+                    actionable_advice JSONB,
+                    
+                    url TEXT,
+                    
+                    gold_price_snapshot DOUBLE PRECISION,
+                    price_1h DOUBLE PRECISION,
+                    price_24h DOUBLE PRECISION,
+                    market_session TEXT,
+                    clustering_score INTEGER DEFAULT 0,
+                    exhaustion_score DOUBLE PRECISION DEFAULT 0.0,
+                    dxy_snapshot DOUBLE PRECISION,
+                    us10y_snapshot DOUBLE PRECISION,
+                    gvz_snapshot DOUBLE PRECISION
+                );
+            """)
+            
+            # Migration
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS dxy_snapshot DOUBLE PRECISION;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS us10y_snapshot DOUBLE PRECISION;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS gvz_snapshot DOUBLE PRECISION;")
+            
+            # Migration
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS clustering_score INTEGER DEFAULT 0;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS exhaustion_score DOUBLE PRECISION DEFAULT 0.0;")
+            
+            # Market Indicators Table (Weekly/Daily)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS market_indicators (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    indicator_name TEXT NOT NULL,
+                    value DOUBLE PRECISION,
+                    percentile DOUBLE PRECISION,
+                    description TEXT,
+                    UNIQUE(timestamp, indicator_name)
+                );
+            """)
+            
+            # Migration/Update for existing table (Postgres-safe)
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS market_session TEXT;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS fed_regime DOUBLE PRECISION;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS macro_adjustment DOUBLE PRECISION DEFAULT 0.0;")
+            cursor.execute("ALTER TABLE intelligence ADD COLUMN IF NOT EXISTS sentiment_score DOUBLE PRECISION;")
+            
+            # Create Indexes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_intelligence_timestamp ON intelligence(timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_intelligence_source_id ON intelligence(source_id);
+            """)
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"PostgreSQL Init Failed: {e}")
+            # If DB init fails, we probably can't run. Let it raise or stay broken.
+
+    def update_outcome(self, record_id, price_1h=None, price_24h=None):
+        """Update historical outcome data."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            if price_1h is not None:
+                cursor.execute("UPDATE intelligence SET price_1h = %s WHERE id = %s", (price_1h, record_id))
+                
+            if price_24h is not None:
+                cursor.execute("UPDATE intelligence SET price_24h = %s WHERE id = %s", (price_24h, record_id))
+                
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.info(f"✅ Outcome Updated ID: {record_id} | 1h: {price_1h} | 24h: {price_24h}")
+            conn.close()
+        except Exception as e:
+            logger.error(f"Update Outcome Failed: {e}")
+
+    def get_pending_outcomes(self):
+        """Get records older than 1 hour that lack price_1h."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            
+            cursor.execute("""
+                SELECT * FROM intelligence 
+                WHERE price_1h IS NULL 
+                AND timestamp < NOW() - INTERVAL '1 hour'
+                ORDER BY timestamp DESC LIMIT 50
+            """)
+            
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Get Pending Outcomes Failed: {e}")
+            return []
+
+
+    def save_raw_intelligence(self, raw_data):
+        """Save raw intelligence data immediately usually before analysis."""
+        try:
+            # 1. Parse time
+            news_time = None
+            if raw_data.get('timestamp'):
+                import dateutil.parser
+                try:
+                    if isinstance(raw_data['timestamp'], str):
+                        news_time = dateutil.parser.parse(raw_data['timestamp'])
+                    elif hasattr(raw_data['timestamp'], 'tm_year'):
+                        from time import mktime
+                        import calendar
+                        import pytz
+                        timestamp_utc = calendar.timegm(raw_data['timestamp'])
+                        news_time = datetime.fromtimestamp(timestamp_utc, tz=pytz.utc)
+                except Exception as e:
+                    logger.warning(f"Timestamp parsing failed: {e}")
+            
+            import pytz
+            if news_time is None:
+                news_time = datetime.now(pytz.utc)
+            else:
+                if news_time.tzinfo is None:
+                    news_time = pytz.utc.localize(news_time)
+                else:
+                    news_time = news_time.astimezone(pytz.utc)
+
+            # Metrics
+            market_session = self.get_market_session(news_time)
+            clustering_score, exhaustion_score = self.get_advanced_metrics(news_time, raw_data.get('content'))
+            
+            # Snapshots
+            dxy = raw_data.get('dxy_snapshot')
+            if dxy is None: dxy = self.get_market_snapshot("DX-Y.NYB", news_time)
+                
+            us10y = raw_data.get('us10y_snapshot')
+            if us10y is None: us10y = self.get_market_snapshot("^TNX", news_time)
+                
+            gvz = raw_data.get('gvz_snapshot')
+            if gvz is None: gvz = self.get_market_snapshot("^GVZ", news_time)
+            
+            gold = self.get_market_snapshot("GC=F", news_time)
+
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO intelligence (
+                    source_id, author, content, url, timestamp, 
+                    market_session, clustering_score, exhaustion_score,
+                    dxy_snapshot, us10y_snapshot, gvz_snapshot, gold_price_snapshot,
+                    fed_regime
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (source_id) DO NOTHING
+                RETURNING id
+            """, (
+                raw_data.get('id'),
+                raw_data.get('author'),
+                raw_data.get('original_content') if raw_data.get('original_content') else raw_data.get('content'), 
+                raw_data.get('url'),
+                news_time,
+                market_session,
+                clustering_score,
+                float(exhaustion_score),
+                float(dxy) if dxy is not None else None,
+                float(us10y) if us10y is not None else None,
+                float(gvz) if gvz is not None else None,
+                float(gold) if gold is not None else None,
+                float(raw_data.get('fed_val', 0.0))
+            ))
+            
+            row = cursor.fetchone()
+            conn.commit()
+            conn.close()
+            
+            return row[0] if row else None
+            
+        except Exception as e:
+            logger.error(f"Save Raw Failed: {e}")
+            return None
+
+    def update_intelligence_analysis(self, source_id, analysis_result, raw_data):
+        """Update a record with analysis results."""
+        try:
+            # Re-calc macro (or pass it in?)
+            sentiment_score = analysis_result.get('sentiment_score', 0)
+            orig_score = sentiment_score
+            fed_val = raw_data.get('fed_val', 0)
+            
+            macro_adj = 0.0
+            if fed_val > 0: # Dovish
+                macro_adj = 0.15
+                sentiment_score = max(-1.0, min(1.0, sentiment_score + 0.15))
+                logger.info(f"⚖️  Dimension D 权调节 (Dovish/+0.15): {orig_score:.2f} -> {sentiment_score:.2f}")
+            elif fed_val < 0: # Hawkish
+                macro_adj = -0.15
+                sentiment_score = max(-1.0, min(1.0, sentiment_score - 0.15))
+                logger.info(f"⚖️  Dimension D 权调节 (Hawkish/-0.15): {orig_score:.2f} -> {sentiment_score:.2f}")
+
+            def to_jsonb(val):
+                if isinstance(val, (dict, list)): return Json(val)
+                return Json(val)
+
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE intelligence SET
+                    summary = %s,
+                    sentiment = %s,
+                    urgency_score = %s,
+                    market_implication = %s,
+                    actionable_advice = %s,
+                    sentiment_score = %s,
+                    macro_adjustment = %s
+                WHERE source_id = %s
+            """, (
+                to_jsonb(analysis_result.get('summary')),
+                to_jsonb(analysis_result.get('sentiment')),
+                analysis_result.get('urgency_score'),
+                to_jsonb(analysis_result.get('market_implication')),
+                to_jsonb(analysis_result.get('actionable_advice')),
+                float(sentiment_score),
+                float(macro_adj),
+                source_id
+            ))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"💾 Updated Analysis for ID: {source_id}")
+            
+        except Exception as e:
+            logger.error(f"Update Analysis Failed: {e}")
+
+
+    def save_intelligence(self, raw_data, analysis_result, gold_price_snapshot=None, price_1h=None, price_24h=None):
+        """
+        Save intelligence to PostgreSQL using JSONB.
+        
+        Args:
+            raw_data: Raw news data
+            analysis_result: AI analysis result
+            gold_price_snapshot: Optional pre-fetched gold price at event time (for historical imports)
+            price_1h: Optional gold price 1 hour after event (for historical imports)
+            price_24h: Optional gold price 24 hours after event (for historical imports)
+            dxy_snapshot: Optional DXY price at event time
+            us10y_snapshot: Optional US10Y yield at event time
+            gvz_snapshot: Optional GVZ (volatility) at event time
+        """
+        try:
+            # 1. Parse time (to timezone-aware datetime)
+            news_time = None
+            if raw_data.get('timestamp'):
+                import dateutil.parser
+                try:
+                    if isinstance(raw_data['timestamp'], str):
+                        news_time = dateutil.parser.parse(raw_data['timestamp'])
+                        logger.info(f"Parsed timestamp from string: {raw_data['timestamp']} -> {news_time}")
+                    elif hasattr(raw_data['timestamp'], 'tm_year'):
+                        from time import mktime
+                        import calendar
+                        import pytz
+                        # Use calendar.timegm for UTC time.struct_time (not mktime which assumes local time)
+                        timestamp_utc = calendar.timegm(raw_data['timestamp'])
+                        news_time = datetime.fromtimestamp(timestamp_utc, tz=pytz.utc)
+                        logger.info(f"Parsed timestamp from struct_time: {raw_data['timestamp']} -> {news_time}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse timestamp {raw_data.get('timestamp')}: {e}")
+            
+            # 1.5 Calculate Market Session
+            market_session = self.get_market_session(news_time)
+            
+            # 1.6 Advanced Trading Metrics (Clustering & Exhaustion)
+            clustering_score, exhaustion_score = self.get_advanced_metrics(news_time, raw_data.get('content'))
+            
+            # 2. Get real-time snapshots if missing (for live processing)
+            import pytz
+            if news_time is None:
+                logger.warning(f"No valid timestamp found for news, using current time. URL: {raw_data.get('url')}")
+                news_time = datetime.now(pytz.utc)
+            else:
+                if news_time.tzinfo is None:
+                    news_time = pytz.utc.localize(news_time)
+                else:
+                    news_time = news_time.astimezone(pytz.utc)
+
+            if gold_price_snapshot is None:
+                gold_price_snapshot = self.get_market_snapshot("GC=F", news_time)
+            
+            dxy = raw_data.get('dxy_snapshot')
+            if dxy is None:
+                dxy = self.get_market_snapshot("DX-Y.NYB", news_time)
+            
+            us10y = raw_data.get('us10y_snapshot')
+            if us10y is None:
+                us10y = self.get_market_snapshot("^TNX", news_time)
+                
+            gvz = raw_data.get('gvz_snapshot')
+            if gvz is None:
+                gvz = self.get_market_snapshot("^GVZ", news_time)
+            
+            sentiment_score = analysis_result.get('sentiment_score', 0)
+            orig_score = sentiment_score
+            
+            fed_val = raw_data.get('fed_val', 0)
+
+
+            
+            # Macro Regime Offset (Dimension D)
+            macro_adj = 0.0
+            if fed_val > 0: # Dovish
+                macro_adj = 0.15
+                sentiment_score = max(-1.0, min(1.0, sentiment_score + 0.15))
+                logger.info(f"⚖️  Dimension D 权调节 (Dovish/+0.15): {orig_score:.2f} -> {sentiment_score:.2f}")
+            elif fed_val < 0: # Hawkish
+                macro_adj = -0.15
+                sentiment_score = max(-1.0, min(1.0, sentiment_score - 0.15))
+                logger.info(f"⚖️  Dimension D 权调节 (Hawkish/-0.15): {orig_score:.2f} -> {sentiment_score:.2f}")
+            
+            current_gold_price = gold_price_snapshot
+            
+            conn = self._get_conn()
+            cursor = conn.cursor()
+
+            def to_jsonb(val):
+                """Ensure valid JSON or wrap text in JSON structure"""
+                if isinstance(val, (dict, list)): return Json(val)
+                # If it's pure text, wrap it or store as string if field allows (but we defined JSONB)
+                # For i18n fields, if we get a raw string, we might want to wrap it: {"raw": str}
+                # But to stay compatible with frontend which expects object, let's wrap.
+                return Json(val)
+
+            cursor.execute("""
+                INSERT INTO intelligence (
+                    source_id, author, content, summary, sentiment, 
+                    urgency_score, market_implication, actionable_advice, url,
+                    gold_price_snapshot, price_1h, price_24h, timestamp, market_session,
+                    clustering_score, exhaustion_score, dxy_snapshot, us10y_snapshot, gvz_snapshot,
+                    sentiment_score, fed_regime, macro_adjustment
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (source_id) DO NOTHING
+            """, (
+                raw_data.get('id'),
+                raw_data.get('author'),
+                raw_data.get('content'),
+                to_jsonb(analysis_result.get('summary')),
+                to_jsonb(analysis_result.get('sentiment')),
+                analysis_result.get('urgency_score'),
+                to_jsonb(analysis_result.get('market_implication')),
+                to_jsonb(analysis_result.get('actionable_advice')),
+                raw_data.get('url'),
+                float(current_gold_price) if current_gold_price is not None else None,
+                float(price_1h) if price_1h is not None else None,
+                float(price_24h) if price_24h is not None else None,
+                news_time,
+                market_session,
+                clustering_score,
+                float(exhaustion_score) if exhaustion_score is not None else 0.0,
+                float(dxy) if dxy is not None else None,
+                float(us10y) if us10y is not None else None,
+                float(gvz) if gvz is not None else None,
+                float(sentiment_score),
+                float(fed_val) if fed_val is not None else 0.0,
+                float(macro_adj)
+            ))
+
+            conn.commit()
+            if cursor.rowcount > 0:
+                price_info = f"${current_gold_price}"
+                if price_1h:
+                    price_info += f" | 1h: ${price_1h}"
+                if price_24h:
+                    price_info += f" | 24h: ${price_24h}"
+                logger.info(f"💾 Saved Intelligence to Postgres | Gold: {price_info}")
+            
+            conn.close()
+
+        except Exception as e:
+            logger.error(f"Save Intelligence Failed: {e}")
+
+    def get_market_session(self, dt=None):
+        """
+        Determine market session from timestamp (UTC).
+        Asia: 00:00 - 08:00
+        London: 08:00 - 15:00
+        New York: 15:00 - 22:00
+        Gap/Late NY: 22:00 - 24:00
+        """
+        if not dt:
+            dt = datetime.now()
+        
+        # Ensure UTC
+        import pytz
+        if dt.tzinfo is None:
+            dt = pytz.utc.localize(dt)
+        else:
+            dt = dt.astimezone(pytz.utc)
+            
+        hour = dt.hour
+        
+        if 0 <= hour < 8:
+            return "ASIA"
+        elif 8 <= hour < 15:
+            return "LONDON"
+        elif 15 <= hour < 22:
+            return "NEWYORK"
+        else:
+            return "LATE_NY"
+
+    def get_advanced_metrics(self, dt, content):
+        """
+        Calculate Scenario A (Clustering) and Scenario B (Exhaustion)
+        """
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            # 1. Clustering Score (Scenario A): News items in the last 1 hour
+            # We look for ANY news items within 1 hour to see if signal is "mixed"
+            cursor.execute("""
+                SELECT COUNT(*) FROM intelligence 
+                WHERE timestamp BETWEEN %s - INTERVAL '1 hour' AND %s + INTERVAL '1 hour'
+            """, (dt, dt))
+            clustering_score = cursor.fetchone()[0]
+            
+            # 2. Exhaustion Score (Scenario B): Sentiment slope last 24h
+            # Count similar bearish news to see if "market has already sold off"
+            cursor.execute("""
+                SELECT COUNT(*) FROM intelligence 
+                WHERE timestamp BETWEEN %s - INTERVAL '24 hours' AND %s
+                AND urgency_score >= 5
+            """, (dt, dt))
+            exhaustion_score = float(cursor.fetchone()[0])
+            
+            conn.close()
+            return clustering_score, exhaustion_score
+        except:
+            return 0, 0.0
+
+    def get_market_snapshot(self, ticker_symbol, target_time):
+        """Unified snapshot fetcher for Gold, DXY, US10Y, GVZ"""
+        try:
+            ticker = yf.Ticker(ticker_symbol)
+            import pytz
+            now = datetime.now(pytz.utc)
+            
+            # For very recent events, use fast_info
+            if (now - target_time).total_seconds() < 1800:
+                price = ticker.fast_info.last_price
+                if price: return round(price, 3)
+            
+            # Fallback to history for older or missing fast_info
+            start = target_time - timedelta(days=1)
+            end = target_time + timedelta(days=1)
+            hist = ticker.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"), interval="1h")
+            if hist.empty: return None
+            
+            hist.index = hist.index.tz_convert('UTC')
+            idx = hist.index.get_indexer([target_time], method='nearest')[0]
+            price = hist.iloc[idx]['Close']
+            return round(price, 3)
+        except Exception as e:
+            logger.warning(f"Market Snapshot Failed for {ticker_symbol}: {e}")
+            return None
+
+    def get_historical_gold_price(self, target_time=None):
+        try:
+            ticker = yf.Ticker("GC=F")
+            is_recent = True
+            if target_time:
+                import pytz
+                now = datetime.now(pytz.utc)
+                if target_time.tzinfo is None:
+                    target_time = pytz.utc.localize(target_time)
+                if (now - target_time).total_seconds() > 1800:
+                    is_recent = False
+
+            if is_recent:
+                price = ticker.fast_info.last_price
+                if price: return round(price, 2)
+                data = ticker.history(period="1d")
+                if not data.empty: return round(data['Close'].iloc[-1], 2)
+            else:
+                start = target_time - timedelta(days=1)
+                end = target_time + timedelta(days=1)
+                hist = ticker.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"), interval="1h")
+                if hist.empty: return None
+                hist.index = hist.index.tz_convert('UTC')
+                idx = hist.index.get_indexer([target_time], method='nearest')[0]
+                price = hist.iloc[idx]['Close']
+                return round(price, 2)
+        except Exception as e:
+            logger.warning(f"Gold Price Fetch Failed: {e}")
+        return None
+
+    def get_latest_indicator(self, indicator_name, dt=None):
+        """Get the most recent indicator value relative to a timestamp."""
+        try:
+            if not dt:
+                dt = datetime.now()
+            conn = self._get_conn()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            cursor.execute("""
+                SELECT * FROM market_indicators 
+                WHERE indicator_name = %s AND timestamp <= %s 
+                ORDER BY timestamp DESC LIMIT 1
+            """, (indicator_name, dt))
+            row = cursor.fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Get Indicator Failed: {e}")
+            return None
+
+    def save_indicator(self, dt, name, value, percentile=None, description=None):
+        """Save or update a market indicator."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO market_indicators (timestamp, indicator_name, value, percentile, description)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (timestamp, indicator_name) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    percentile = EXCLUDED.percentile,
+                    description = EXCLUDED.description
+            """, (dt, name, value, percentile, description))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Save Indicator Failed: {e}")
+
+    def get_recent_intelligence(self, limit=10):
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            cursor.execute("SELECT * FROM intelligence ORDER BY timestamp DESC LIMIT %s", (limit,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Get Recent Failed: {e}")
+            return []
+
+    def is_duplicate(self, new_url, new_content, new_summary=None) -> bool:
+        """
+        Checks for duplicate intelligence using URL and pg_trgm for content similarity.
+        
+        Args:
+            new_url (str): The URL of the new intelligence item.
+            new_content (str): The main content of the new intelligence item.
+            new_summary (str): The summary of the new intelligence item.
+        Returns:
+            bool: True if a duplicate is found, False otherwise.
+        """
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            
+            # 1. Exact URL match (most reliable)
+            cursor.execute("SELECT id FROM intelligence WHERE url = %s LIMIT 1", (new_url,))
+            if cursor.fetchone():
+                logger.info(f"🚫 URL {new_url} 已存在，跳过。")
+                conn.close()
+                return True
+
+            # 2. Semantic similarity check using pg_trgm on content/summary
+            # Only check against recent items to avoid performance issues on large datasets
+            time_window = datetime.now() - timedelta(hours=settings.NEWS_DEDUPE_WINDOW_HOURS)
+            
+            # Combine content and summary for a more robust similarity check
+            new_text_for_sim = f"{new_content} {new_summary if new_summary else ''}"
+            
+            # Use COALESCE to handle potentially null content/summary in DB
+            cursor.execute("""
+                SELECT id, similarity(COALESCE(content, '') || ' ' || COALESCE(summary::text, ''), %s) AS sim_score
+                FROM intelligence 
+                WHERE timestamp > %s
+                AND (
+                    similarity(COALESCE(content, ''), %s) > %s OR
+                    similarity(COALESCE(summary::text, ''), %s) > %s OR
+                    similarity(COALESCE(content, '') || ' ' || COALESCE(summary::text, ''), %s) > %s
+                )
+                ORDER BY sim_score DESC
+                LIMIT 1
+            """, (new_text_for_sim, time_window, new_content, settings.NEWS_SIMILARITY_THRESHOLD,
+                  new_summary if new_summary else '', settings.NEWS_SIMILARITY_THRESHOLD,
+                  new_text_for_sim, settings.NEWS_SIMILARITY_THRESHOLD))
+            
+            result = cursor.fetchone()
+            conn.close()
+
+            if result:
+                logger.info(f"🚫 发现语义重复情报 (ID: {result[0]}, 相似度: {result[1]:.2f})，跳过。")
+                return True
+                
+            return False
+        except Exception as e:
+            logger.error(f"Duplicate Check Failed: {e}")
+            # In case of error, assume it's not a duplicate to avoid blocking new intelligence
+            return False

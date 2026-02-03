@@ -1,0 +1,98 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "AI 驱动的地缘政治情报终端",
+    "goldFutures": "黄金期货",
+    "activeAlerts": "活跃警报",
+    "liveFeed": "实时情报流",
+    "loading": "系统初始化中...",
+    "items": "条",
+    "viewSource": "来源",
+    "searchPlaceholder": "搜索情报...",
+    "filterAll": "全部",
+    "filterEssential": "高分 8+",
+    "filterBearish": "利空",
+    "liveFeedLabel": "实时情报流"
+  },
+  "Table": {
+    "title": "战术策略矩阵",
+    "time": "时间",
+    "context": "事件背景",
+    "strategy": "AI 策略",
+    "goldRef": "金价参考"
+  },
+  "Sentiment": {
+    "hawkish": "鹰派",
+    "dovish": "鸽派",
+    "score": "评分"
+  },
+  "AIInsights": {
+    "title": "AI 洞察",
+    "stable": "市场稳定：未检测到关键驱动因素",
+    "n1": "AI 观点：中东局势加剧导致避险资金流向黄金。",
+    "n2": "市场警报：美联储鹰派言论引发债券收益率波动。",
+    "n3": "观察：美元指数与黄金之间的强负相关性被打破。",
+    "n4": "系统提示：在矿业板块检测到异常期权活动。",
+    "n5": "突发：欧洲央行暗示即将召开的会议可能降息。",
+    "n6": "趋势：白银期货的散户情绪转向看涨。"
+  },
+  "MarketContext": {
+    "dxy": "美元指数",
+    "us10y": "10年美债",
+    "crude": "原油",
+    "vix": "恐慌指数 (VIX)"
+  },
+  "Chart": {
+    "title": "价格走势 vs 情绪事件",
+    "intraday": "分时",
+    "day": "日K",
+    "week": "周K",
+    "month": "月K",
+    "quarter": "季K",
+    "year": "年K",
+    "all": "All"
+  },
+  "Backtest": {
+    "bearishSignals": "利空信号 (评分 8+)",
+    "events": "次事件",
+    "accuracy": "预测准确率",
+    "avgDrop": "平均预测跌幅",
+    "waiting": "等待行情数据...",
+    "noData": "当前范围内未找到用于回测的高影响利空事件。",
+    "window1h": "1小时窗口",
+    "window24h": "24小时窗口",
+    "title": "AI 预测回测表现",
+    "scenarioA": "方案 A：启用聚类保护",
+    "scenarioB": "方案 B：缺口修正",
+    "adjusted": "调整后",
+    "adjAccuracy": "调整后准确率",
+    "marketHygiene": "市场健康度",
+    "density": "密度 (聚类)",
+    "exhaustion": "衰竭度",
+    "dxySensitivity": "美元敏感度",
+    "strongUsd": "强美元",
+    "weakUsd": "弱美元",
+    "positioningCot": "持仓 (COT)",
+    "overcrowdedLong": "多头拥挤",
+    "neutralRange": "中性区间",
+    "volatilityRegime": "波动率 (机制)",
+    "highVol": "高波动 (恐慌)",
+    "lowVol": "低波动 (稳定)",
+    "sessionBreakdown": "市场时段可靠性细分",
+    "best": "最佳",
+    "win": "胜率",
+    "sessions": {
+      "ASIA": "亚洲盘",
+      "LONDON": "伦敦盘",
+      "NEWYORK": "纽约盘",
+      "LATE_NY": "纽约尾盘"
+    }
+  },
+  "DimensionD": {
+    "label": "宏观基调",
+    "dovish": "偏鸽 (Dovish +0.15)",
+    "hawkish": "偏鹰 (Hawkish -0.15)",
+    "neutral": "中性",
+    "inhibited": "已抑制 (波动过热)"
+  }
+}

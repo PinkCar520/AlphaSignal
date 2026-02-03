@@ -1,0 +1,24 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "Terminal de Renseignement Géopolitique IA",
+    "goldFutures": "FUTURS OR",
+    "activeAlerts": "ALERTES ACTIVES",
+    "liveFeed": "FLUX EN DIRECT",
+    "loading": "INITIALISATION DU SYSTÈME...",
+    "items": "ÉLÉMENTS",
+    "viewSource": "SOURCE"
+  },
+  "Table": {
+    "title": "MATRICE DE STRATÉGIE TACTIQUE",
+    "time": "HEURE",
+    "context": "CONTEXTE",
+    "strategy": "STRATÉGIE IA",
+    "goldRef": "RÉF OR"
+  },
+  "Sentiment": {
+    "hawkish": "FAUCON",
+    "dovish": "COLOMBE",
+    "score": "SCORE"
+  }
+}

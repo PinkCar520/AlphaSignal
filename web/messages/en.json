@@ -1,0 +1,98 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "AI-Driven Geopolitical Intelligence Terminal",
+    "goldFutures": "GOLD FUTURES",
+    "activeAlerts": "ACTIVE ALERTS",
+    "liveFeed": "LIVE FEED",
+    "loading": "SYSTEM INITIALIZING...",
+    "items": "ITEMS",
+    "viewSource": "SOURCE",
+    "searchPlaceholder": "Search intelligence...",
+    "filterAll": "All",
+    "filterEssential": "Score 8+",
+    "filterBearish": "Bearish",
+    "liveFeedLabel": "LIVE FEED"
+  },
+  "Table": {
+    "title": "TACTICAL STRATEGY MATRIX",
+    "time": "TIME",
+    "context": "EVENT CONTEXT",
+    "strategy": "AI STRATEGY",
+    "goldRef": "GOLD REF"
+  },
+  "Sentiment": {
+    "hawkish": "HAWKISH",
+    "dovish": "DOVISH",
+    "score": "SCORE"
+  },
+  "AIInsights": {
+    "title": "AI INSIGHT",
+    "stable": "Market Stable: No Critical Drivers Detected",
+    "n1": "AI Insight: Middle East tensions driving safe-haven flows into Gold.",
+    "n2": "Market Alert: Fed hawkish comments causing bond yield volatility.",
+    "n3": "Observation: Strong inverse correlation between DXY and Gold breaks down.",
+    "n4": "System Note: Unusual options activity detected in mining sector.",
+    "n5": "Breaking: ECB signals potential rate cut in upcoming meeting.",
+    "n6": "Trend: Retail sentiment shifting bullish on silver futures."
+  },
+  "MarketContext": {
+    "dxy": "US DOLLAR INDEX",
+    "us10y": "US 10Y YIELD",
+    "crude": "CRUDE OIL",
+    "vix": "VOLATILITY (VIX)"
+  },
+  "Chart": {
+    "title": "Price Action vs. Sentiment Events",
+    "intraday": "Intraday",
+    "day": "1D",
+    "week": "1W",
+    "month": "1M",
+    "quarter": "3M",
+    "year": "1Y",
+    "all": "All"
+  },
+  "Backtest": {
+    "bearishSignals": "Bearish Signals (Score 8+)",
+    "events": "Events",
+    "accuracy": "Accuracy",
+    "avgDrop": "Avg Drop",
+    "waiting": "waiting for market data...",
+    "noData": "No high-impact bearish events found in current range for backtesting.",
+    "window1h": "1H Window",
+    "window24h": "24H Window",
+    "title": "AI Prediction Backtest Performance",
+    "scenarioA": "Scenario A: Clustering Protection Active",
+    "scenarioB": "Scenario B: Gap Corrected",
+    "adjusted": "Adjusted",
+    "adjAccuracy": "Adj. Accuracy",
+    "marketHygiene": "Market Hygiene",
+    "density": "Density (Clust)",
+    "exhaustion": "Exhaustion",
+    "dxySensitivity": "DXY Sensitivity",
+    "strongUsd": "Strong USD",
+    "weakUsd": "Weak USD",
+    "positioningCot": "Positioning (COT)",
+    "overcrowdedLong": "Overcrowded Long",
+    "neutralRange": "Neutral Range",
+    "volatilityRegime": "Volatility (Regime)",
+    "highVol": "High Vol (Panic)",
+    "lowVol": "Low Vol (Stable)",
+    "sessionBreakdown": "Market Session Reliability Breakdown",
+    "best": "Best",
+    "win": "Win",
+    "sessions": {
+      "ASIA": "ASIA",
+      "LONDON": "LONDON",
+      "NEWYORK": "NEWYORK",
+      "LATE_NY": "LATE_NY"
+    }
+  },
+  "DimensionD": {
+    "label": "MACRO REGIME",
+    "dovish": "DOVISH (+0.15)",
+    "hawkish": "HAWKISH (-0.15)",
+    "neutral": "NEUTRAL",
+    "inhibited": "INHIBITED (VOLATILITY)"
+  }
+}

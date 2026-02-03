@@ -1,0 +1,24 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "KI-gesteuertes Geopolitisches Intelligenz-Terminal",
+    "goldFutures": "GOLD FUTURES",
+    "activeAlerts": "AKTIVE ALARME",
+    "liveFeed": "LIVE-FEED",
+    "loading": "SYSTEM INITIALISIERUNG...",
+    "items": "ELEMENTE",
+    "viewSource": "QUELLE"
+  },
+  "Table": {
+    "title": "TAK TISCHE STRATEGIE-MATRIX",
+    "time": "ZEIT",
+    "context": "KONTEXT",
+    "strategy": "KI STRATEGIE",
+    "goldRef": "GOLD REF"
+  },
+  "Sentiment": {
+    "hawkish": "FALKE",
+    "dovish": "TAUBE",
+    "score": "PUNKTZAHL"
+  }
+}

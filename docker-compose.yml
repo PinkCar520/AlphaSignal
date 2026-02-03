@@ -1,0 +1,102 @@
+
+
+services:
+  # 0. PostgreSQL Database (New Data Center)
+  db:
+    image: postgres:15-alpine
+    container_name: alphasignal_db
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-alphasignal}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password}
+      - POSTGRES_DB=${POSTGRES_DB:-alphasignal_core}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432" # Exposed for local debugging/migration
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alphasignal -d alphasignal_core"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 1. Background Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: alphasignal_worker
+    command: python run.py
+    volumes:
+      - .:/app
+      - ./logs:/app/logs 
+    env_file:
+      - .env
+    environment:
+      - DB_TYPE=postgres
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-alphasignal}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password}
+      - POSTGRES_DB=${POSTGRES_DB:-alphasignal_core}
+      - HF_ENDPOINT=https://hf-mirror.com
+      - HTTP_PROXY=http://host.docker.internal:7890
+      - HTTPS_PROXY=http://host.docker.internal:7890
+      - ALL_PROXY=socks5://host.docker.internal:7890
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 2. API Server (SSE)
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: alphasignal_api
+    command: python sse_server.py
+    ports:
+      - "8001:8001"
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - DB_TYPE=postgres
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-alphasignal}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password}
+      - POSTGRES_DB=${POSTGRES_DB:-alphasignal_core}
+      - HOST=0.0.0.0
+      - PORT=8001
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # 3. Frontend (Next.js)
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: alphasignal_web
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8001/api
+      - API_INTERNAL_URL=http://api:8001
+      - DB_TYPE=postgres
+      - POSTGRES_HOST=db
+      - POSTGRES_USER=${POSTGRES_USER:-alphasignal}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-secure_password}
+      - POSTGRES_DB=${POSTGRES_DB:-alphasignal_core}
+    restart: unless-stopped
+    depends_on:
+      - api
+      - db
+
+volumes:
+  postgres_data:
+    driver: local

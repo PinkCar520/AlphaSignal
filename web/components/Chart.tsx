@@ -1,0 +1,172 @@
+'use client';
+
+import React, { useMemo, useState } from 'react';
+import dynamic from 'next/dynamic';
+import { Card } from './ui/Card';
+import { useTranslations } from 'next-intl';
+import { Intelligence } from '@/lib/db';
+
+const Plot = dynamic(() => import('react-plotly.js'), { ssr: false }) as any;
+
+interface ChartProps {
+  marketData: any;
+  intelligence: Intelligence[];
+  onRangeChange: (range: string, interval: string) => void;
+}
+
+const RANGES = [
+  { label: 'intraday', range: '1d', interval: '5m' },
+  { label: 'day', range: '1mo', interval: '1d' },
+  { label: 'week', range: '2y', interval: '1wk' },
+  { label: 'month', range: '5y', interval: '1mo' },
+  { label: 'quarter', range: '10y', interval: '3mo' }, // Yahoo limits might apply
+  { label: 'year', range: 'max', interval: '3mo' }, // 1y interval often unstable
+  { label: 'all', range: 'max', interval: '1mo' },
+];
+
+export default function Chart({ marketData, intelligence, onRangeChange }: ChartProps) {
+  const t = useTranslations('Chart');
+  const [activeLabel, setActiveLabel] = useState('day');
+
+  const handleRangeClick = (range: string, interval: string, label: string) => {
+    setActiveLabel(label);
+    onRangeChange(range, interval);
+  };
+
+  const RangeSelector = (
+    <div className="flex bg-slate-900/50 rounded-lg p-0.5 border border-slate-800/50">
+      {RANGES.map((r) => (
+        <button
+          key={r.label}
+          onClick={() => handleRangeClick(r.range, r.interval, r.label)}
+          className={`px-3 py-1 text-[10px] font-bold uppercase tracking-wider rounded-md transition-all duration-200 ${activeLabel === r.label
+            ? 'bg-emerald-500/20 text-emerald-400 shadow-sm border border-emerald-500/20'
+            : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'
+            }`}
+        >
+          {t(r.label)}
+        </button>
+      ))}
+    </div>
+  );
+
+  if (!marketData || !marketData.quotes) return (
+    <Card className="h-[450px] p-0 border-slate-800" title={t('title')} action={RangeSelector}>
+      <div className="h-full flex flex-col justify-between p-6 animate-pulse">
+        {/* Skeleton: Y-axis labels */}
+        <div className="flex justify-between items-start mb-4">
+          <div className="flex flex-col gap-3">
+            <div className="h-3 w-16 bg-slate-800 rounded"></div>
+            <div className="h-3 w-16 bg-slate-800 rounded"></div>
+            <div className="h-3 w-16 bg-slate-800 rounded"></div>
+          </div>
+          <div className="text-slate-600 text-xs">Loading market data...</div>
+        </div>
+
+        {/* Skeleton: Chart area with candlestick-like bars */}
+        <div className="flex-1 flex items-end justify-around gap-1 px-4">
+          {[...Array(20)].map((_, i) => (
+            <div
+              key={i}
+              className="bg-slate-800/50 rounded-sm"
+              style={{
+                height: `${Math.random() * 60 + 20}%`,
+                width: '3%',
+                opacity: 0.3 + Math.random() * 0.4
+              }}
+            ></div>
+          ))}
+        </div>
+
+        {/* Skeleton: X-axis labels */}
+        <div className="flex justify-between mt-4 px-4">
+          {[...Array(5)].map((_, i) => (
+            <div key={i} className="h-3 w-20 bg-slate-800 rounded"></div>
+          ))}
+        </div>
+      </div>
+    </Card>
+  );
+
+  // Prepare data for Plotly
+  const traces = [
+    // Candlestick trace
+    {
+      x: marketData.quotes.map((q: any) => q.date),
+      close: marketData.quotes.map((q: any) => q.close),
+      high: marketData.quotes.map((q: any) => q.high),
+      low: marketData.quotes.map((q: any) => q.low),
+      open: marketData.quotes.map((q: any) => q.open),
+
+      // increasing: { line: { color: '#10B981', width: 1 }, fillcolor: '#10B981' },
+      // decreasing: { line: { color: '#F43F5E', width: 1 }, fillcolor: '#F43F5E' },
+      increasing: { line: { color: '#34d399' } },
+      decreasing: { line: { color: '#fb7185' } },
+
+      type: 'candlestick',
+      xaxis: 'x',
+      yaxis: 'y',
+      name: 'Gold Futures',
+      showlegend: false,
+    },
+    // Markers for Bullish Events
+    {
+      x: intelligence.filter(i => !/鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => i.timestamp),
+      y: intelligence.filter(i => !/鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => i.gold_price_snapshot || marketData.quotes[marketData.quotes.length - 1].close), // Fallback price
+      mode: 'markers',
+      type: 'scatter',
+      name: 'Bullish Signal',
+      marker: { symbol: 'triangle-up', size: 10, color: '#10B981' }, // Emerald 500
+      hoverinfo: 'text',
+      text: intelligence.filter(i => !/鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => `${i.summary} (Score: ${i.urgency_score})`),
+    },
+    // Markers for Bearish Events
+    {
+      x: intelligence.filter(i => /鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => i.timestamp),
+      y: intelligence.filter(i => /鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => i.gold_price_snapshot || marketData.quotes[marketData.quotes.length - 1].close),
+      mode: 'markers',
+      type: 'scatter',
+      name: 'Bearish Signal',
+      marker: { symbol: 'triangle-down', size: 10, color: '#F43F5E' }, // Rose 500
+      hoverinfo: 'text',
+      text: intelligence.filter(i => /鹰|利空|下跌|风险|Bearish/.test(i.sentiment)).map(i => `${i.summary} (Score: ${i.urgency_score})`),
+    }
+  ];
+
+  return (
+    <Card className="p-0 border-slate-800" title={t('title')} action={RangeSelector}>
+      <Plot
+        data={traces}
+        layout={{
+          autosize: true,
+          height: 450,
+          margin: { l: 50, r: 20, t: 30, b: 40 },
+          plot_bgcolor: 'transparent',
+          paper_bgcolor: 'transparent',
+          font: { color: '#94a3b8', family: 'monospace' },
+          xaxis: {
+            gridcolor: '#1e293b',
+            rangeslider: { visible: false },
+            type: 'date',
+            tickformat: activeLabel === 'intraday' ? '%H:%M' : '%Y-%m-%d'
+          },
+          yaxis: {
+            gridcolor: '#1e293b',
+            side: 'right'
+          },
+          showlegend: true,
+          legend: { x: 0, y: 1 },
+          hovermode: 'x unified',
+          hoverlabel: {
+            bgcolor: '#0f172a',
+            bordercolor: '#334155',
+            font: { color: '#e2e8f0' }
+          }
+        }}
+        useResizeHandler={true}
+        style={{ width: '100%' }}
+        config={{ responsive: true, displayModeBar: false }}
+      />
+    </Card>
+  );
+}

@@ -1,0 +1,24 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "Terminal de Inteligência Geopolítica IA",
+    "goldFutures": "FUTUROS DE OURO",
+    "activeAlerts": "ALERTA ATIVO",
+    "liveFeed": "FEED AO VIVO",
+    "loading": "INICIALIZANDO SISTEMA...",
+    "items": "ITENS",
+    "viewSource": "FONTE"
+  },
+  "Table": {
+    "title": "MATRIZ DE ESTRATÉGIA TÁTICA",
+    "time": "HORA",
+    "context": "CONTEXTO",
+    "strategy": "ESTRATÉGIA IA",
+    "goldRef": "REF OURO"
+  },
+  "Sentiment": {
+    "hawkish": "FALCÃO",
+    "dovish": "POMBA",
+    "score": "PONTUAÇÃO"
+  }
+}

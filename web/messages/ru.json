@@ -1,0 +1,24 @@
+{
+  "Dashboard": {
+    "title": "Alpha Signal",
+    "subtitle": "Терминал геополитической разведки на ИИ",
+    "goldFutures": "ФЬЮЧЕРСЫ ЗОЛОТА",
+    "activeAlerts": "АКТИВНЫЕ ТРЕВОГИ",
+    "liveFeed": "ПРЯМОЙ ЭФИР",
+    "loading": "ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ...",
+    "items": "ЭЛЕМЕНТОВ",
+    "viewSource": "ИСТОЧНИК"
+  },
+  "Table": {
+    "title": "МАТРИЦА ТАКТИЧЕСКИХ СТРАТЕГИЙ",
+    "time": "ВРЕМЯ",
+    "context": "КОНТЕКСТ",
+    "strategy": "ИИ СТРАТЕГИЯ",
+    "goldRef": "ЦЕНА ЗОЛОТА"
+  },
+  "Sentiment": {
+    "hawkish": "ЯСТРЕБ",
+    "dovish": "ГОЛУБЬ",
+    "score": "ОЧКИ"
+  }
+}
