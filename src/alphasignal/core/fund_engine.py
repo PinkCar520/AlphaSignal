@@ -157,9 +157,20 @@ class FundEngine:
             final_est = 0.0
             if total_weight > 0:
                 final_est = total_impact * (100 / total_weight)
-                
+            
+            # Fetch Fund Name (Lazy fetch)
+            fund_name = ""
+            try:
+                # Use Xueqiu API for single fund info
+                info_df = ak.fund_individual_basic_info_xq(symbol=fund_code)
+                # Usually row 1 is '基金简称'
+                fund_name = info_df[info_df.iloc[:,0] == '基金简称'].iloc[0,1]
+            except:
+                pass
+
             result = {
                 "fund_code": fund_code,
+                "fund_name": fund_name,
                 "estimated_growth": round(final_est, 4),
                 "total_weight": total_weight,
                 "components": components, # detailed attribution

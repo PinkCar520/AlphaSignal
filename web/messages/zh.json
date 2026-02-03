@@ -94,5 +94,23 @@
     "hawkish": "偏鹰 (Hawkish -0.15)",
     "neutral": "中性",
     "inhibited": "已抑制 (波动过热)"
+  },
+  "Funds": {
+    "title": "AlphaFunds 估值引擎",
+    "subtitle": "实时净值估算系统",
+    "watchlist": "关注列表",
+    "addPlaceholder": "输入基金代码...",
+    "estimatedGrowth": "估算涨跌幅",
+    "live": "实时",
+    "basedOn": "基于 {count} 只重仓股 (权重 {weight}%)",
+    "lastUpdated": "最后更新: {time}",
+    "topDrivers": "领涨/领跌",
+    "attribution": "持仓归因分析",
+    "tableStock": "股票",
+    "tablePrice": "价格",
+    "tableChange": "涨跌幅",
+    "tableWeight": "权重",
+    "tableImpact": "贡献度",
+    "selectFund": "请选择基金以查看估值"
   }
 }

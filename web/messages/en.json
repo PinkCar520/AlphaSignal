@@ -94,5 +94,23 @@
     "hawkish": "HAWKISH (-0.15)",
     "neutral": "NEUTRAL",
     "inhibited": "INHIBITED (VOLATILITY)"
+  },
+  "Funds": {
+    "title": "AlphaFunds Valuation",
+    "subtitle": "Real-time NAV Estimation Engine",
+    "watchlist": "Watchlist",
+    "addPlaceholder": "Add Fund Code...",
+    "estimatedGrowth": "Estimated Growth",
+    "live": "LIVE",
+    "basedOn": "Based on {count} holdings ({weight}% weight)",
+    "lastUpdated": "Last Updated: {time}",
+    "topDrivers": "Top Drivers",
+    "attribution": "Holdings Attribution",
+    "tableStock": "Stock",
+    "tablePrice": "Price",
+    "tableChange": "Change",
+    "tableWeight": "Weight",
+    "tableImpact": "Impact",
+    "selectFund": "Select a fund to calculate valuation"
   }
 }
