@@ -6,6 +6,7 @@ import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Search, RefreshCw, ArrowUp, ArrowDown, PieChart, X, Target, Scale, Anchor, AlertTriangle } from 'lucide-react';
 import FundSearch from '@/components/FundSearch';
+
 import { SectorAttribution } from '@/components/SectorAttribution';
 
 interface ComponentStock {
@@ -19,11 +20,15 @@ interface ComponentStock {
 
 interface FundValuation {
     fund_code: string;
-    fund_name?: string;
+    fund_name: string;
     estimated_growth: number;
     total_weight: number;
     components: ComponentStock[];
-    sector_attribution?: Record<string, { impact: number, weight: number }>;
+    sector_attribution?: Record<string, {
+        impact: number;
+        weight: number;
+        sub: Record<string, { impact: number; weight: number; }>;
+    }>;
     timestamp: string;
     source?: string;
 }
@@ -34,6 +39,13 @@ interface ValuationHistory {
     official_growth: number;
     deviation: number;
     tracking_status: string;
+    sector_attribution?: Record<string, {
+        impact: number;
+        weight: number;
+        sub: Record<string, { impact: number; weight: number; }>;
+    }>;
+    timestamp: string;
+    source?: string;
 }
 
 interface WatchlistItem {
@@ -576,7 +588,7 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                                 >
                                                     <RefreshCw className={`w-4 h-4 text-slate-400 transition-transform ${refreshing ? 'animate-spin' : ''}`} />
                                                 </button>
-                                                <Badge variant={valuation.estimated_growth >= 0 ? 'bearish' : 'bullish'}>
+                                                <Badge variant={valuation.estimated_growth >= 0 ? 'bullish' : 'bearish'}>
                                                     {t('live')}
                                                 </Badge>
                                             </div>
@@ -601,9 +613,9 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                     <h2 className="text-sm font-mono text-slate-500 uppercase tracking-widest mb-4">{t('topDrivers')}</h2>
                                     <div className="flex flex-col gap-2">
                                         {valuation.components
-                                            .sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact))
+                                            .sort((a: ComponentStock, b: ComponentStock) => Math.abs(b.impact) - Math.abs(a.impact))
                                             .slice(0, 3)
-                                            .map(comp => (
+                                            .map((comp: ComponentStock) => (
                                                 <div key={comp.code} className="flex justify-between items-center text-xs border-b border-slate-100 pb-2 last:border-0 hover:bg-slate-50 p-1 rounded">
                                                     <div className="flex gap-2">
                                                         <span className="font-mono text-slate-500">{comp.code}</span>
@@ -648,45 +660,45 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                                     <SectorAttribution data={valuation.sector_attribution} />
                                                 </div>
                                             )}
-                                            
+
                                             <table className="w-full text-left border-collapse text-sm">
                                                 <thead className="sticky top-0 bg-white z-10">
                                                     <tr className="border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider shadow-sm bg-slate-50/80 backdrop-blur">
                                                         <th className="p-3">{t('tableStock')}</th>
                                                         <th className="p-3 text-right">{t('tablePrice')}</th>
-                                                    <th className="p-3 text-right">{t('tableChange')}</th>
-                                                    <th className="p-3 text-right">{t('tableWeight')}</th>
-                                                    <th className="p-3 text-right">{t('tableImpact')}</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100">
-                                                {valuation.components
-                                                    .slice()
-                                                    .sort((a, b) => b.weight - a.weight)
-                                                    .map(comp => (
-                                                        <tr key={comp.code} className="group hover:bg-slate-50 transition-colors">
-                                                            <td className="p-3">
-                                                                <div className="flex flex-col">
-                                                                    <span className="font-bold text-slate-800">{comp.name}</span>
-                                                                    <span className="text-[10px] font-mono text-slate-500">{comp.code}</span>
-                                                                </div>
-                                                            </td>
-                                                            <td className="p-3 text-right font-mono text-slate-600">
-                                                                {comp.price.toFixed(2)}
-                                                            </td>
-                                                            <td className={`p-3 text-right font-mono font-bold ${comp.change_pct >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                                                                {comp.change_pct > 0 ? "+" : ""}{comp.change_pct.toFixed(2)}%
-                                                            </td>
-                                                            <td className="p-3 text-right font-mono text-slate-500">
-                                                                {comp.weight.toFixed(2)}%
-                                                            </td>
-                                                            <td className={`p-3 text-right font-mono font-bold ${comp.impact >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                                                                {comp.impact > 0 ? "+" : ""}{comp.impact.toFixed(3)}%
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                            </tbody>
-                                        </table>
+                                                        <th className="p-3 text-right">{t('tableChange')}</th>
+                                                        <th className="p-3 text-right">{t('tableWeight')}</th>
+                                                        <th className="p-3 text-right">{t('tableImpact')}</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {valuation.components
+                                                        .slice()
+                                                        .sort((a: ComponentStock, b: ComponentStock) => b.weight - a.weight)
+                                                        .map((comp: ComponentStock) => (
+                                                            <tr key={comp.code} className="group hover:bg-slate-50 transition-colors">
+                                                                <td className="p-3">
+                                                                    <div className="flex flex-col">
+                                                                        <span className="font-bold text-slate-800">{comp.name}</span>
+                                                                        <span className="text-[10px] font-mono text-slate-500">{comp.code}</span>
+                                                                    </div>
+                                                                </td>
+                                                                <td className="p-3 text-right font-mono text-slate-600">
+                                                                    {comp.price.toFixed(2)}
+                                                                </td>
+                                                                <td className={`p-3 text-right font-mono font-bold ${comp.change_pct >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                    {comp.change_pct > 0 ? "+" : ""}{comp.change_pct.toFixed(2)}%
+                                                                </td>
+                                                                <td className="p-3 text-right font-mono text-slate-500">
+                                                                    {comp.weight.toFixed(2)}%
+                                                                </td>
+                                                                <td className={`p-3 text-right font-mono font-bold ${comp.impact >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                    {comp.impact > 0 ? "+" : ""}{comp.impact.toFixed(3)}%
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                </tbody>
+                                            </table>
                                         </div>
                                     ) : (
                                         <div className="flex flex-col h-full">

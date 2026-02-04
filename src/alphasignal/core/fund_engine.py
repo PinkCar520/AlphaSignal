@@ -22,7 +22,6 @@ class FundEngine:
             self.redis = None
 
     def update_fund_holdings(self, fund_code):
-        # ... (keep existing implementation of update_fund_holdings) ...
         """Fetch latest holdings from AkShare and save to DB."""
         logger.info(f"🔍 Fetching holdings for fund: {fund_code}")
         
@@ -77,8 +76,11 @@ class FundEngine:
             logger.error(f"Update Holdings Failed: {e}")
             return []
         finally:
-            # Restore proxy if needed (skipped for now as per previous logic)
-            pass
+            # Restore proxy if needed
+            if original_http:
+                os.environ['HTTP_PROXY'] = original_http
+            if original_https:
+                os.environ['HTTPS_PROXY'] = original_https
 
     def _get_fund_name(self, fund_code):
         """Fetch Fund Name with Redis Cache."""
@@ -106,24 +108,27 @@ class FundEngine:
 
     def _get_industry_map(self, stock_codes: list):
         """
-        Fetch industry mapping for a list of stocks.
-        Strategy: Redis Hash 'stock:industry:l1' -> DB -> Cache
+        Fetch industry mapping (L1 & L2) for a list of stocks.
+        Strategy: Redis Hash 'stock:industry:full' -> DB -> Cache
+        Returns: { '600519': {'l1': '食品饮料', 'l2': '白酒'} }
         """
         if not stock_codes: return {}
         if not self.redis: return {}
         
         # 1. Try Fetch from Redis
         try:
-            # We use a single Hash for all mappings: "stock:industry:l1"
-            # Getting multiple fields
-            industries = self.redis.hmget("stock:industry:l1", stock_codes)
+            # Redis stores JSON string: "{'l1':..., 'l2':...}"
+            raw_data = self.redis.hmget("stock:industry:full", stock_codes)
             
             result = {}
             missing_codes = []
             
-            for code, ind in zip(stock_codes, industries):
-                if ind:
-                    result[code] = ind
+            for code, raw_json in zip(stock_codes, raw_data):
+                if raw_json:
+                    try:
+                        result[code] = json.loads(raw_json)
+                    except:
+                        missing_codes.append(code)
                 else:
                     missing_codes.append(code)
             
@@ -133,29 +138,36 @@ class FundEngine:
                 
             # 2. Fetch missing from DB
             if missing_codes:
-                # logger.info(f"Fetching {len(missing_codes)} missing industries from DB")
                 conn = self.db.get_connection()
                 try:
+                    pipeline = self.redis.pipeline() # Initialize pipeline
                     with conn.cursor() as cursor:
-                        # Use ANY for array check in Postgres
-                        cursor.execute("SELECT stock_code, industry_l1_name FROM stock_metadata WHERE stock_code = ANY(%s)", (missing_codes,))
+                        cursor.execute("""
+                            SELECT stock_code, industry_l1_name, industry_l2_name 
+                            FROM stock_metadata 
+                            WHERE stock_code = ANY(%s)
+                        """, (missing_codes,))
                         rows = cursor.fetchall()
                         
-                        db_map = {r[0]: r[1] for r in rows}
-                        result.update(db_map)
+                        db_updates = {}
+                        for r in rows:
+                            val = {'l1': r[1] or "其他", 'l2': r[2] or "其他"}
+                            db_updates[r[0]] = json.dumps(val)
+                            result[r[0]] = val
                         
                         # Cache found ones back to Redis
-                        if db_map:
-                            self.redis.hset("stock:industry:l1", mapping=db_map)
+                        if db_updates:
+                            pipeline.hset("stock:industry:full", mapping=db_updates)
                             
-                        # Mark unknowns to avoid repeated DB hits? (Optional, maybe "Unknown")
-                        unknowns = set(missing_codes) - set(db_map.keys())
+                        # Mark unknowns
+                        unknowns = set(missing_codes) - set(result.keys())
                         if unknowns:
-                             # Cache as "其他" or "Unknown"
-                             unknown_map = {c: "其他" for c in unknowns}
-                             self.redis.hset("stock:industry:l1", mapping=unknown_map)
-                             result.update(unknown_map)
-                             
+                             unknown_val = {'l1': "其他", 'l2': "其他"}
+                             unknown_json = json.dumps(unknown_val)
+                             unknown_map = {c: unknown_json for c in unknowns}
+                             pipeline.hset("stock:industry:full", mapping=unknown_map)
+                             for c in unknowns: result[c] = unknown_val
+                    pipeline.execute() # Execute pipeline
                 finally:
                     conn.close()
                     
@@ -355,9 +367,9 @@ class FundEngine:
             components = []
             
             # Init Sector Map
-            sector_stats = {} # "IndustryName": {"impact": 0, "weight": 0}
+            sector_stats = {} 
             
-            # Bulk fetch industry mapping for these holdings
+            # Bulk fetch industry mapping
             holding_codes = [h.get('stock_code') or h.get('code') for h in holdings]
             industry_map = self._get_industry_map(holding_codes)
             
@@ -396,19 +408,23 @@ class FundEngine:
                         "weight": weight,
                         "note": "No Quote"
                     })
-                    
+                
                 # Sector Aggregation
-                industry = industry_map.get(code, "其他")
-                if industry not in sector_stats:
-                    sector_stats[industry] = {"impact": 0.0, "weight": 0.0}
-                sector_stats[industry]["impact"] += current_impact
-                sector_stats[industry]["weight"] += weight
-
-            # RE-CHECK for Feeder (if component weight is low)
-            if total_weight < 40 and "联接" in fund_name:
-                 # Try to find ETF in components that was missed or treat name match
-                 # If we missed the ETF in holdings (maybe not in top 10?), we can't do much without external mapping.
-                 pass
+                ind_info = industry_map.get(code, {'l1': "其他", 'l2': "其他"})
+                l1 = ind_info.get('l1') or "其他"
+                l2 = ind_info.get('l2') or "其他"
+                
+                if l1 not in sector_stats:
+                    sector_stats[l1] = {"impact": 0.0, "weight": 0.0, "sub": {}}
+                
+                sector_stats[l1]["impact"] += current_impact
+                sector_stats[l1]["weight"] += weight
+                
+                if l2 not in sector_stats[l1]["sub"]:
+                    sector_stats[l1]["sub"][l2] = {"impact": 0.0, "weight": 0.0}
+                
+                sector_stats[l1]["sub"][l2]["impact"] += current_impact
+                sector_stats[l1]["sub"][l2]["weight"] += weight
 
             # 5. Normalize
             final_est = 0.0
@@ -421,15 +437,10 @@ class FundEngine:
             import pytz
             tz_cn = pytz.timezone('Asia/Shanghai')
 
-            # --- Manual Calibration (2026-02-04) ---
+            # --- Manual Calibration ---
             BIAS_MAP = {
-                "018927": 0.62,
-                "018125": 0.56,
-                "018123": 0.65,
-                "023754": 0.42,
-                "015790": -0.71,
-                "011068": -0.48,
-                "025209": -0.65
+                "018927": 0.62, "018125": 0.56, "018123": 0.65, "023754": 0.42,
+                "015790": -0.71, "011068": -0.48, "025209": -0.65
             }
             calibration_note = ""
             if fund_code in BIAS_MAP:
@@ -442,7 +453,7 @@ class FundEngine:
                 "fund_name": fund_name,
                 "estimated_growth": round(final_est, 4),
                 "total_weight": total_weight,
-                "components": components,
+                "components": components, 
                 "sector_attribution": sector_stats,
                 "timestamp": datetime.now(tz_cn).isoformat(),
                 "source": "EastMoney" + calibration_note
@@ -480,6 +491,7 @@ class FundEngine:
         all_holdings = {}
         stock_map = {} # code -> market_id needed
         
+        # Collect holdings
         # Collect holdings
         for f_code in fund_codes:
             holdings = self.db.get_fund_holdings(f_code)
@@ -574,13 +586,12 @@ class FundEngine:
         results = []
         tz_cn = datetime.now().astimezone().replace(tzinfo=None) # simple local time
         
-        # Pre-fetch all industry mappings for the entire batch to be efficient
+        # Pre-fetch industry mappings
         all_stock_codes = []
         for f_code, holdings in all_holdings.items():
             for h in holdings:
                 s_code = h.get('stock_code') or h.get('code')
                 if s_code: all_stock_codes.append(s_code)
-        
         industry_map = self._get_industry_map(list(set(all_stock_codes)))
 
         for f_code in fund_codes:
@@ -592,7 +603,7 @@ class FundEngine:
             total_impact = 0.0
             total_weight = 0.0
             components = []
-            sector_stats = {} # "IndustryName": {"impact": 0, "weight": 0}
+            sector_stats = {}
             
             for h in holdings:
                 code = h.get('stock_code') or h.get('code')
@@ -601,7 +612,6 @@ class FundEngine:
                 
                 q = quotes.get(code)
                 current_impact = 0.0
-                
                 if q:
                     price = q['price']
                     pct = q['change_pct']
@@ -614,17 +624,27 @@ class FundEngine:
                         "change_pct": pct, "impact": impact, "weight": weight
                     })
                 else:
-                     components.append({
+                    components.append({
                         "code": code, "name": name, "price": 0, 
                         "change_pct": 0, "impact": 0, "weight": weight, "note": "No Quote"
                     })
                 
                 # Sector Aggregation
-                industry = industry_map.get(code, "其他")
-                if industry not in sector_stats:
-                    sector_stats[industry] = {"impact": 0.0, "weight": 0.0}
-                sector_stats[industry]["impact"] += current_impact
-                sector_stats[industry]["weight"] += weight
+                ind_info = industry_map.get(code, {'l1': "其他", 'l2': "其他"})
+                l1 = ind_info.get('l1') or "其他"
+                l2 = ind_info.get('l2') or "其他"
+                
+                if l1 not in sector_stats:
+                    sector_stats[l1] = {"impact": 0.0, "weight": 0.0, "sub": {}}
+                
+                sector_stats[l1]["impact"] += current_impact
+                sector_stats[l1]["weight"] += weight
+                
+                if l2 not in sector_stats[l1]["sub"]:
+                    sector_stats[l1]["sub"][l2] = {"impact": 0.0, "weight": 0.0}
+                
+                sector_stats[l1]["sub"][l2]["impact"] += current_impact
+                sector_stats[l1]["sub"][l2]["weight"] += weight
             
             final_est = 0.0
             if total_weight > 0:
@@ -824,7 +844,8 @@ class FundEngine:
                 trade_date=trade_date,
                 fund_code=val['fund_code'],
                 est_growth=val['estimated_growth'],
-                components_json=val['components']
+                components_json=val['components'],
+                sector_json=val.get('sector_attribution')
             )
             count += 1
             

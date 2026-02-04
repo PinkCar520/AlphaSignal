@@ -175,6 +175,7 @@ class IntelligenceDB:
                     fund_code TEXT NOT NULL,
                     frozen_est_growth NUMERIC(10, 4),
                     frozen_components JSONB,
+                    frozen_sector_attribution JSONB,
                     official_growth NUMERIC(10, 4),
                     deviation NUMERIC(10, 4),
                     abs_deviation NUMERIC(10, 4),
@@ -185,6 +186,9 @@ class IntelligenceDB:
                 );
                 CREATE INDEX IF NOT EXISTS idx_archive_date_code ON fund_valuation_archive (trade_date, fund_code);
             """)
+
+            # Migration for Sector Attribution in Archive
+            cursor.execute("ALTER TABLE fund_valuation_archive ADD COLUMN IF NOT EXISTS frozen_sector_attribution JSONB;")
 
             # Fund Managers
             cursor.execute("""
@@ -976,18 +980,19 @@ class IntelligenceDB:
             logger.error(f"Search Funds Metadata Failed: {e}")
             return []
 
-    def save_valuation_snapshot(self, trade_date, fund_code, est_growth, components_json):
+    def save_valuation_snapshot(self, trade_date, fund_code, est_growth, components_json, sector_json=None):
         """Save the 15:00 frozen snapshot of a fund valuation."""
         try:
             conn = self._get_conn()
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO fund_valuation_archive (trade_date, fund_code, frozen_est_growth, frozen_components)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO fund_valuation_archive (trade_date, fund_code, frozen_est_growth, frozen_components, frozen_sector_attribution)
+                VALUES (%s, %s, %s, %s, %s)
                 ON CONFLICT (trade_date, fund_code) DO UPDATE SET
                     frozen_est_growth = EXCLUDED.frozen_est_growth,
-                    frozen_components = EXCLUDED.frozen_components
-            """, (trade_date, fund_code, est_growth, Json(components_json)))
+                    frozen_components = EXCLUDED.frozen_components,
+                    frozen_sector_attribution = EXCLUDED.frozen_sector_attribution
+            """, (trade_date, fund_code, est_growth, Json(components_json), Json(sector_json) if sector_json else None))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -1036,7 +1041,8 @@ class IntelligenceDB:
             conn = self._get_conn()
             cursor = conn.cursor(cursor_factory=DictCursor)
             cursor.execute("""
-                SELECT trade_date, frozen_est_growth, official_growth, deviation, tracking_status
+                SELECT trade_date, frozen_est_growth, official_growth, deviation, tracking_status, 
+                       frozen_sector_attribution AS sector_attribution
                 FROM fund_valuation_archive
                 WHERE fund_code = %s AND official_growth IS NOT NULL
                 ORDER BY trade_date DESC
