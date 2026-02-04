@@ -105,107 +105,170 @@ class FundEngine:
         return fund_name
 
     def calculate_realtime_valuation(self, fund_code):
-        """Calculate live estimated NAV growth based on holdings."""
-        # 0. Check Cache
+        """Calculate live estimated NAV growth based on holdings (Source: EastMoney/AkShare)."""
+        # 0. Check Cache (Fund Valuation Result)
         if self.redis:
             cached_val = self.redis.get(f"fund:valuation:{fund_code}")
             if cached_val:
                 logger.info(f"⚡️ Using cached valuation for {fund_code}")
                 return json.loads(cached_val)
         
-        # Force disable proxy for reliability
+        # Force disable proxy for reliability with AkShare/EastMoney
+        old_proxies = {}
         for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "all_proxy", "ALL_PROXY"]:
-            if k in os.environ: del os.environ[k]
+            if k in os.environ:
+                old_proxies[k] = os.environ[k]
+                del os.environ[k]
         os.environ["NO_PROXY"] = "*"
 
-        # 1. Get Holdings from DB
-        holdings = self.db.get_fund_holdings(fund_code)
-        
-        # If no holdings in DB, try to fetch
-        if not holdings:
-            holdings = self.update_fund_holdings(fund_code)
-            
-        if not holdings:
-            return {"error": "No holdings data"}
-            
-        logger.info(f"📈 Calculating valuation for {fund_code} ({len(holdings)} stocks)")
-
-        # 2. Get Realtime Quotes via Yahoo Finance
-        yf_tickers = []
-        mapping = {} 
-        
-        for h in holdings:
-            code = h['stock_code']
-            yf_code = code
-            if len(code) == 6:
-                suffix = ".SS" if code.startswith("6") else ".SZ"
-                if code.startswith("4") or code.startswith("8"): suffix = ".BJ"
-                yf_code = code + suffix
-            elif len(code) == 5:
-                # HK
-                yf_code = str(int(code)) + ".HK"
-            
-            yf_tickers.append(yf_code)
-            mapping[yf_code] = h
-            
         try:
-            tickers = yf.Tickers(" ".join(yf_tickers))
+            # 1. Get Holdings from DB
+            holdings = self.db.get_fund_holdings(fund_code)
+            
+            # If no holdings in DB, try to fetch
+            if not holdings:
+                holdings = self.update_fund_holdings(fund_code)
+                
+            if not holdings:
+                return {"error": "No holdings data"}
+                
+            logger.info(f"📈 Calculating valuation for {fund_code} ({len(holdings)} stocks) using EastMoney")
+
+            # 2. Identify Markets (A-Share vs HK)
+            need_ashare = False
+            need_hk = False
+            holding_codes = set()
+            
+            for h in holdings:
+                code = h.get('stock_code') or h.get('code')
+                if not code: continue
+                holding_codes.add(code)
+                if len(code) == 6 or (len(code) == 5 and code.startswith("0") and not code.startswith("00")): 
+                    need_ashare = True
+                elif len(code) == 5:
+                    need_hk = True
+                else:
+                    need_ashare = True
+
+            # 3. Fetch Market Snapshots (with short caching)
+            def get_market_snapshot(market_type):
+                cache_key = f"market:snapshot:{market_type}"
+                if self.redis:
+                    c = self.redis.get(cache_key)
+                    if c: return pd.read_json(c)
+                
+                if market_type == 'a':
+                    df = ak.stock_zh_a_spot_em()
+                else:
+                    df = ak.stock_hk_spot_em()
+                
+                # Cache for 60s
+                if self.redis and not df.empty:
+                    self.redis.setex(cache_key, 60, df.to_json())
+                return df
+
+            quote_map = {} 
+            
+            # Fetch A-Shares
+            if need_ashare:
+                try:
+                    df_a = get_market_snapshot('a')
+                    # Normalize columns
+                    code_col = next((c for c in df_a.columns if '代码' in c), None)
+                    price_col = next((c for c in df_a.columns if '最新价' in c), None)
+                    change_col = next((c for c in df_a.columns if '涨跌幅' in c), None)
+                    
+                    if code_col and price_col and change_col:
+                        for _, row in df_a.iterrows():
+                            c_code = str(row[code_col])
+                            if c_code in holding_codes:
+                                try:
+                                    quote_map[c_code] = {
+                                        'price': float(row[price_col]),
+                                        'change_pct': float(row[change_col])
+                                    }
+                                except: pass
+                except Exception as e:
+                    logger.error(f"Failed to fetch A-share snapshot: {e}")
+
+            # Fetch HK-Shares
+            if need_hk:
+                try:
+                    df_hk = get_market_snapshot('hk')
+                    code_col = next((c for c in df_hk.columns if '代码' in c), None)
+                    price_col = next((c for c in df_hk.columns if '最新价' in c), None)
+                    change_col = next((c for c in df_hk.columns if '涨跌幅' in c), None)
+                    
+                    if code_col and price_col and change_col:
+                        for _, row in df_hk.iterrows():
+                            c_code = str(row[code_col])
+                            if c_code in holding_codes:
+                                try:
+                                    quote_map[c_code] = {
+                                        'price': float(row[price_col]),
+                                        'change_pct': float(row[change_col])
+                                    }
+                                except: pass
+                except Exception as e:
+                    logger.error(f"Failed to fetch HK-share snapshot: {e}")
+
+            # 4. Calculate Valuation
             total_impact = 0.0
             total_weight = 0.0
             components = []
             
-            # Iterate and fetch
-            for yf_code in yf_tickers:
-                try:
-                    ticker = tickers.tickers[yf_code]
-                    # Try fast info
-                    price = ticker.fast_info.last_price
-                    prev_close = ticker.fast_info.previous_close
-                    
-                    if price and prev_close:
-                        pct = ((price - prev_close) / prev_close) * 100
-                    else:
-                        # Fallback
-                        hist = ticker.history(period="1d")
-                        if not hist.empty:
-                             pct = 0.0 # Simplified fallback
-                        else:
-                             pct = 0.0
-                            
-                    stock_data = mapping[yf_code]
-                    weight = stock_data['weight']
+            for h in holdings:
+                code = h.get('stock_code') or h.get('code')
+                weight = h['weight']
+                name = h.get('stock_name') or h.get('name') or code
+                
+                quote = quote_map.get(code)
+                if quote:
+                    price = quote['price']
+                    pct = quote['change_pct']
                     impact = pct * (weight / 100.0)
                     
                     total_impact += impact
                     total_weight += weight
                     
                     components.append({
-                        "code": stock_data['stock_code'],
-                        "name": stock_data['stock_name'],
-                        "price": price if price else 0.0,
+                        "code": code,
+                        "name": name,
+                        "price": price,
                         "change_pct": pct,
                         "impact": impact,
                         "weight": weight
                     })
-                    
-                except Exception as e:
-                    pass
-            
-            # 3. Normalize
+                else:
+                    components.append({
+                        "code": code,
+                        "name": name,
+                        "price": 0.0,
+                        "change_pct": 0.0,
+                        "impact": 0.0,
+                        "weight": weight,
+                        "note": "No Quote"
+                    })
+
+            # 5. Normalize
             final_est = 0.0
             if total_weight > 0:
                 final_est = total_impact * (100 / total_weight)
             
-            # Fetch Fund Name (Lazy fetch with Cache)
+            # Fetch Fund Name
             fund_name = self._get_fund_name(fund_code)
+
+            import pytz
+            tz_cn = pytz.timezone('Asia/Shanghai')
 
             result = {
                 "fund_code": fund_code,
                 "fund_name": fund_name,
                 "estimated_growth": round(final_est, 4),
                 "total_weight": total_weight,
-                "components": components, # detailed attribution
-                "timestamp": datetime.now().isoformat()
+                "components": components, 
+                "timestamp": datetime.now(tz_cn).isoformat(),
+                "source": "EastMoney"
             }
             
             # Save to DB history
@@ -213,7 +276,7 @@ class FundEngine:
                 self.db.save_fund_valuation(fund_code, final_est, result)
             except: pass
             
-            # Set Cache (180s expire - optimized for watchlist switching)
+            # Set Cache (180s)
             if self.redis:
                 self.redis.setex(f"fund:valuation:{fund_code}", 180, json.dumps(result))
             
@@ -222,6 +285,174 @@ class FundEngine:
         except Exception as e:
             logger.error(f"Valuation Calc Failed: {e}")
             return {"error": str(e)}
+            # Restore proxies
+            for k, v in old_proxies.items():
+                os.environ[k] = v
+
+    def calculate_batch_valuation(self, fund_codes: list):
+        """
+        Calculate valuations for multiple funds in a single batch request using efficient EastMoney API.
+        """
+        import requests
+        
+        # 1. Fetch Holdings for ALL funds
+        # Use DB first, then fetch missing
+        # To avoid sequential fetching of missing holdings, we just do best effort for now or simple loop
+        # Optimizing holding fetch is secondary, usually they are in DB.
+        
+        all_holdings = {}
+        stock_map = {} # code -> market_id needed
+        
+        # Collect holdings
+        for f_code in fund_codes:
+            holdings = self.db.get_fund_holdings(f_code)
+            if not holdings:
+                # If cached holding missing, try fetch (this part is still slow if many missing)
+                holdings = self.update_fund_holdings(f_code)
+            
+            all_holdings[f_code] = holdings or []
+            
+            for h in (holdings or []):
+                s_code = h.get('stock_code') or h.get('code')
+                if not s_code: continue
+                
+                # Determine SecID for Tencent
+                # Tencent: sh6xxxx, sz0xxxx/3xxxx, bj8xxxx/4xxxx, hk0xxxx, usXXXX
+                secid = None
+                if len(s_code) == 6:
+                    if s_code.startswith('6') or s_code.startswith('9'): secid = f"sh{s_code}"
+                    elif s_code.startswith('0') or s_code.startswith('3'): secid = f"sz{s_code}"
+                    elif s_code.startswith('8') or s_code.startswith('4'): secid = f"bj{s_code}"
+                    else: secid = f"sz{s_code}" # Fallback
+                elif len(s_code) == 5:
+                    secid = f"hk{s_code}"
+                elif s_code.isalpha():
+                    secid = f"us{s_code}"
+                    
+                if secid:
+                    stock_map[s_code] = secid
+
+        if not stock_map:
+            return [{"fund_code": f, "estimated_growth": 0, "error": "No holdings"} for f in fund_codes]
+
+        # 2. Batch Fetch Quotes (Tencent)
+        secids_list = list(set(stock_map.values()))
+        chunk_size = 60 # Tencent can handle more, but keep safe
+        quotes = {} # code -> {price, change_pct}
+        
+        for i in range(0, len(secids_list), chunk_size):
+            chunk = secids_list[i:i+chunk_size]
+            url = f"http://qt.gtimg.cn/q={','.join(chunk)}"
+            
+            try:
+                # Tencent doesn't need complex headers
+                res = requests.get(url, timeout=3)
+                # Response is GBK
+                content = res.content.decode('gbk', errors='ignore')
+                
+                # Parse: v_sh600519="1~Name~Code~Price~LastClose~Open~...~...~PCT~..."
+                for line in content.split(';'):
+                    line = line.strip()
+                    if not line: continue
+                    
+                    # line: v_sh600519="1~..."
+                    if '=' not in line: continue
+                    
+                    key_part, val_part = line.split('=', 1)
+                    # key_part: v_sh600519 -> code is sh600519 (remove v_)
+                    # But we need Original Code. We can rely on Index 2 in value which is usually the code?
+                    # Or map back. Let's map back using `stock_map` inverse? 
+                    # Actually Tencent response value Index 2 is the code "600519".
+                    
+                    val_part = val_part.strip('"')
+                    parts = val_part.split('~')
+                    
+                    if len(parts) > 32:
+                        try:
+                            t_code = parts[2] # Pure code like 600519
+                            # For US stocks, parts[2] is like NVDA.OQ, we need NVDA.
+                            # Better: use the market prefix from key to find original s_code
+                            
+                            price = float(parts[3])
+                            # Change Pct is usually index 32
+                            pct = float(parts[32])
+                            
+                            # HK stocks might be different scaling? No, usually raw.
+                            
+                            # Store by pure code if possible, but map back is safer
+                            # Since we don't know which s_code generated this if code is ambiguous (e.g. 000001 SH vs SZ - wait codes are unique with market)
+                            # Let's use t_code.
+                            
+                            # Handle US stock code names
+                            if '.' in t_code and not t_code.replace('.','').isdigit():
+                                t_code = t_code.split('.')[0] # NVDA.OQ -> NVDA
+                                
+                            quotes[t_code] = {'price': price, 'change_pct': pct}
+                        except: 
+                            pass
+            except Exception as e:
+                logger.error(f"Batch quote fetch failed: {e}")
+
+        # 3. Calculate Valuations
+        results = []
+        tz_cn = datetime.now().astimezone().replace(tzinfo=None) # simple local time
+        
+        for f_code in fund_codes:
+            holdings = all_holdings.get(f_code, [])
+            if not holdings:
+                results.append({"fund_code": f_code, "estimated_growth": 0, "error": "No holdings"})
+                continue
+                
+            total_impact = 0.0
+            total_weight = 0.0
+            components = []
+            
+            for h in holdings:
+                code = h.get('stock_code') or h.get('code')
+                name = h.get('stock_name') or h.get('name') or code
+                weight = h['weight']
+                
+                q = quotes.get(code)
+                if q:
+                    price = q['price']
+                    pct = q['change_pct']
+                    impact = pct * (weight / 100.0)
+                    total_impact += impact
+                    total_weight += weight
+                    components.append({
+                        "code": code, "name": name, "price": price, 
+                        "change_pct": pct, "impact": impact, "weight": weight
+                    })
+                else:
+                     components.append({
+                        "code": code, "name": name, "price": 0, 
+                        "change_pct": 0, "impact": 0, "weight": weight, "note": "No Quote"
+                    })
+            
+            final_est = 0.0
+            if total_weight > 0:
+                final_est = total_impact * (100 / total_weight)
+                
+            # Get cached name
+            fund_name = self._get_fund_name(f_code)
+            
+            res_obj = {
+                "fund_code": f_code,
+                "fund_name": fund_name,
+                "estimated_growth": round(final_est, 4),
+                "total_weight": total_weight,
+                "components": components,
+                "timestamp": datetime.now().isoformat(),
+                "source": "EastMoney Batch"
+            }
+            
+            # Update cache
+            if self.redis:
+                self.redis.setex(f"fund:valuation:{f_code}", 180, json.dumps(res_obj))
+                
+            results.append(res_obj)
+            
+        return results
 
     def search_funds(self, query: str, limit: int = 20):
         """

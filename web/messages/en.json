@@ -111,6 +111,7 @@
     "tableChange": "Change",
     "tableWeight": "Weight",
     "tableImpact": "Impact",
+    "refreshWatchlist": "Refresh Watchlist",
     "selectFund": "Select a fund to calculate valuation"
   }
 }

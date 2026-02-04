@@ -36,58 +36,90 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
     const { locale } = React.use(params);
     const t = useTranslations('Funds');
 
-    // Load from localStorage with fallback defaults
-    const getInitialWatchlist = (): WatchlistItem[] => {
-        if (typeof window === 'undefined') return [
-            { code: '022365', name: '永赢科技智选混合C' },
-            { code: '020840', name: '南方中证半导体C' }
-        ];
-        try {
-            const stored = localStorage.getItem('fund_watchlist');
-            if (stored) {
-                const parsed = JSON.parse(stored);
-                return parsed.length > 0 ? parsed : [
-                    { code: '022365', name: '永赢科技智选混合C' },
-                    { code: '020840', name: '南方中证半导体C' }
-                ];
-            }
-        } catch (e) {
-            console.error('Failed to load watchlist from localStorage:', e);
-        }
-        return [
-            { code: '022365', name: '永赢科技智选混合C' },
-            { code: '020840', name: '南方中证半导体C' }
-        ];
-    };
-
-    const getInitialSelectedFund = (): string => {
-        if (typeof window === 'undefined') return '022365';
-        try {
-            const stored = localStorage.getItem('fund_selected');
-            if (stored) return stored;
-        } catch (e) {
-            console.error('Failed to load selected fund from localStorage:', e);
-        }
-        return '022365';
-    };
-
-    const [watchlist, setWatchlist] = useState<WatchlistItem[]>(getInitialWatchlist);
-    const [selectedFund, setSelectedFund] = useState<string>(getInitialSelectedFund);
+    // State management - API Driven
+    const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+    const [selectedFund, setSelectedFund] = useState<string>('');
     const [valuation, setValuation] = useState<FundValuation | null>(null);
     const [loading, setLoading] = useState(false);
-    const [refreshing, setRefreshing] = useState(false); // For refresh button animation
+    const [refreshing, setRefreshing] = useState(false);
+    const [isWatchlistRefreshing, setIsWatchlistRefreshing] = useState(false);
     const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-    // Client-side cache for fund valuations (3 minutes TTL)
+    // Client-side valuation cache
     const [valuationCache, setValuationCache] = useState<Map<string, { data: FundValuation, timestamp: number }>>(new Map());
-    const CACHE_TTL = 3 * 60 * 1000; // 3 minutes in milliseconds
+    const CACHE_TTL = 3 * 60 * 1000;
+
+    // Sorting state: 'desc' (default), 'asc', or 'none' (insertion order)
+    const [sortOrder, setSortOrder] = useState<'desc' | 'asc' | 'none'>('desc');
+
+
+    // Load selected fund preference from local storage (UI preference only)
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            const stored = localStorage.getItem('fund_selected');
+            if (stored) setSelectedFund(stored);
+        }
+    }, []);
+
+    // 1. Fetch Watchlist from API with Migration Logic
+    const fetchWatchlist = async () => {
+        try {
+            const res = await fetch('/api/watchlist');
+            const json = await res.json();
+            if (json.data) {
+                // Check if we need to migrate from localStorage
+                if (json.data.length === 0 && typeof window !== 'undefined') {
+                    const localStored = localStorage.getItem('fund_watchlist');
+                    if (localStored) {
+                        try {
+                            const parsed = JSON.parse(localStored);
+                            if (parsed && parsed.length > 0) {
+                                console.log("Migrating local watchlist to server...", parsed);
+                                for (const item of parsed) {
+                                    await fetch('/api/watchlist', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ code: item.code, name: item.name })
+                                    });
+                                }
+                                // Re-fetch
+                                const res2 = await fetch('/api/watchlist');
+                                const json2 = await res2.json();
+                                if (json2.data) {
+                                    setWatchlist(json2.data);
+                                    localStorage.removeItem('fund_watchlist');
+                                    // Set initial selection if empty & migrating
+                                    if (json2.data.length > 0 && !localStorage.getItem('fund_selected')) {
+                                        setSelectedFund(json2.data[0].code);
+                                    }
+                                    return;
+                                }
+                            }
+                        } catch (e) { console.error("Migration failed", e); }
+                    }
+                }
+                setWatchlist(json.data);
+
+                // Set initial selection if empty and no local pref
+                if (json.data.length > 0 && !selectedFund && typeof window !== 'undefined' && !localStorage.getItem('fund_selected')) {
+                    setSelectedFund(json.data[0].code);
+                }
+            }
+        } catch (e) {
+            console.error("Failed to fetch watchlist", e);
+        }
+    };
+
+    useEffect(() => {
+        fetchWatchlist();
+    }, []);
 
     const fetchValuation = async (code: string) => {
         // Check cache first
         const cached = valuationCache.get(code);
         const now = Date.now();
 
-        if (cached && (now - cached.timestamp) < CACHE_TTL) {
+        if (cached) {
             console.log(`[Cache Hit] Using cached data for ${code}`);
             setValuation(cached.data);
             setLastUpdated(new Date(cached.timestamp));
@@ -146,39 +178,75 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
         }
     }, [selectedFund]);
 
-    // Preload all watchlist funds' data on mount for sorting
+    // Preload all watchlist funds' data on mount using batch API
     useEffect(() => {
         const preloadWatchlist = async () => {
-            for (const item of watchlist) {
-                // Only fetch if not in cache
-                const cached = valuationCache.get(item.code);
-                const now = Date.now();
-                if (!cached || (now - cached.timestamp) >= CACHE_TTL) {
-                    // Fetch in background without blocking UI
-                    fetchValuation(item.code).catch(err => {
-                        console.error(`Failed to preload ${item.code}:`, err);
+            const codesToFetch = watchlist
+                .filter(item => {
+                    // Only fetch if not in cache or expired
+                    const cached = valuationCache.get(item.code);
+                    const now = Date.now();
+                    return !cached || (now - cached.timestamp) >= CACHE_TTL;
+                })
+                .map(item => item.code);
+
+            if (codesToFetch.length === 0) return;
+
+            try {
+                // Fetch in batch
+                const codesParam = codesToFetch.join(',');
+                const res = await fetch(`/api/funds/batch-valuation?codes=${codesParam}`);
+                const response = await res.json();
+
+                if (response.data) {
+                    const now = Date.now();
+                    const fetchTime = new Date();
+
+                    // Update Cache
+                    setValuationCache(prev => {
+                        const newCache = new Map(prev);
+                        response.data.forEach((val: any) => {
+                            if (val && !val.error && val.fund_code) {
+                                newCache.set(val.fund_code, { data: val, timestamp: fetchTime.getTime() });
+                            }
+                        });
+                        return newCache;
                     });
-                    // Small delay to avoid overwhelming the server
-                    await new Promise(resolve => setTimeout(resolve, 200));
+
+                    // Update Watchlist State
+                    setWatchlist(prev => prev.map(item => {
+                        const val = response.data.find((v: any) => v.fund_code === item.code);
+                        if (val && !val.error) {
+                            return {
+                                ...item,
+                                previous_growth: item.estimated_growth,
+                                estimated_growth: val.estimated_growth,
+                                name: (val.fund_name && !item.name) ? val.fund_name : item.name
+                            };
+                        }
+                        return item;
+                    }));
+
+                    // Update selected fund if it was part of the batch
+                    if (selectedFund && codesToFetch.includes(selectedFund)) {
+                        const selectedVal = response.data.find((v: any) => v.fund_code === selectedFund);
+                        if (selectedVal && !selectedVal.error) {
+                            setValuation(selectedVal);
+                            setLastUpdated(fetchTime);
+                        }
+                    }
                 }
+            } catch (err) {
+                console.error('Failed to preload batch:', err);
             }
         };
 
-        // Delay preload slightly to prioritize selected fund
+        // Delay preload slightly to prioritize main UI
         const timer = setTimeout(preloadWatchlist, 1000);
         return () => clearTimeout(timer);
-    }, []); // Only run on mount
+    }, []); // Check only on mount (or you could depend on watchlist length, but be careful of loop)
 
-    // Persist watchlist to localStorage
-    useEffect(() => {
-        if (typeof window !== 'undefined') {
-            try {
-                localStorage.setItem('fund_watchlist', JSON.stringify(watchlist));
-            } catch (e) {
-                console.error('Failed to save watchlist to localStorage:', e);
-            }
-        }
-    }, [watchlist]);
+
 
     // Persist selected fund to localStorage
     useEffect(() => {
@@ -192,29 +260,85 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
     }, [selectedFund]);
 
     // Auto refresh every 3 minutes (matching cache TTL)
-    useEffect(() => {
-        const interval = setInterval(() => {
-            if (selectedFund) {
-                // Clear cache entry to force fresh fetch
+
+
+    // Manual refresh for the entire watchlist
+    const handleWatchlistRefresh = async () => {
+        if (watchlist.length === 0 || isWatchlistRefreshing) return;
+
+        setIsWatchlistRefreshing(true);
+        const codesToFetch = watchlist.map(item => item.code);
+
+        try {
+            const codesParam = codesToFetch.join(',');
+            // Force refresh with timestamp
+            const res = await fetch(`/api/funds/batch-valuation?codes=${codesParam}&t=${Date.now()}`);
+            const response = await res.json();
+
+            if (response.data) {
+                const fetchTime = new Date();
+
+                // Update Cache
                 setValuationCache(prev => {
                     const newCache = new Map(prev);
-                    newCache.delete(selectedFund);
+                    response.data.forEach((val: any) => {
+                        if (val && !val.error && val.fund_code) {
+                            newCache.set(val.fund_code, { data: val, timestamp: fetchTime.getTime() });
+                        }
+                    });
                     return newCache;
                 });
-                fetchValuation(selectedFund);
-            }
-        }, CACHE_TTL);
-        return () => clearInterval(interval);
-    }, [selectedFund]);
 
-    const handleDelete = (e: React.MouseEvent, codeToDelete: string) => {
+                // Update Watchlist State
+                setWatchlist(prev => prev.map(item => {
+                    const val = response.data.find((v: any) => v.fund_code === item.code);
+                    if (val && !val.error) {
+                        return {
+                            ...item,
+                            previous_growth: item.estimated_growth,
+                            estimated_growth: val.estimated_growth,
+                            name: (val.fund_name && !item.name) ? val.fund_name : item.name
+                        };
+                    }
+                    return item;
+                }));
+
+                // Update selected fund if it was part of the batch
+                if (selectedFund && codesToFetch.includes(selectedFund)) {
+                    const selectedVal = response.data.find((v: any) => v.fund_code === selectedFund);
+                    if (selectedVal && !selectedVal.error) {
+                        setValuation(selectedVal);
+                        setLastUpdated(fetchTime);
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Failed to refresh watchlist:', err);
+        } finally {
+            setTimeout(() => {
+                setIsWatchlistRefreshing(false);
+            }, 600);
+        }
+    };
+
+    const handleDelete = async (e: React.MouseEvent, codeToDelete: string) => {
         e.stopPropagation();
-        setWatchlist(prev => prev.filter(item => item.code !== codeToDelete));
-        if (selectedFund === codeToDelete) {
-            // If deleting active, switch to first available or empty
-            const remaining = watchlist.filter(i => i.code !== codeToDelete);
-            if (remaining.length > 0) setSelectedFund(remaining[0].code);
-            else setSelectedFund("");
+
+        try {
+            const res = await fetch(`/api/watchlist/${codeToDelete}`, {
+                method: 'DELETE',
+            });
+            const data = await res.json();
+            if (data.success) {
+                setWatchlist(prev => prev.filter(item => item.code !== codeToDelete));
+                if (selectedFund === codeToDelete) {
+                    const remaining = watchlist.filter(i => i.code !== codeToDelete);
+                    if (remaining.length > 0) setSelectedFund(remaining[0].code);
+                    else setSelectedFund("");
+                }
+            }
+        } catch (err) {
+            console.error('Failed to delete from watchlist:', err);
         }
     };
 
@@ -253,13 +377,57 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 {/* Left: Watchlist */}
                 <div className="lg:col-span-4">
-                    <Card title={t('watchlist')} className="overflow-visible">
+                    <Card
+                        title={t('watchlist')}
+                        className="overflow-visible"
+                        action={
+                            <div className="flex items-center gap-1 bg-slate-800/40 p-0.5 rounded-lg border border-slate-700/50">
+                                <button
+                                    onClick={handleWatchlistRefresh}
+                                    className={`p-1 rounded-md transition-all ${isWatchlistRefreshing ? 'text-purple-400 bg-purple-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'}`}
+                                    title={t('refreshWatchlist')}
+                                    disabled={isWatchlistRefreshing}
+                                >
+                                    <RefreshCw className={`w-3.5 h-3.5 ${isWatchlistRefreshing ? 'animate-spin' : ''}`} />
+                                </button>
+                                <div className="w-px h-3 bg-slate-700 mx-0.5"></div>
+                                <button
+                                    onClick={() => setSortOrder(sortOrder === 'asc' ? 'none' : 'asc')}
+                                    className={`p-1 rounded-md transition-all ${sortOrder === 'asc' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'}`}
+                                    title="涨幅从低到高"
+                                >
+                                    <ArrowUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                    onClick={() => setSortOrder(sortOrder === 'desc' ? 'none' : 'desc')}
+                                    className={`p-1 rounded-md transition-all ${sortOrder === 'desc' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-700'}`}
+                                    title="涨幅从高到低"
+                                >
+                                    <ArrowDown className="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        }
+                    >
                         <div className="flex flex-col h-[calc(100vh-12rem)]">
                             <div className="mb-4 shrink-0 relative z-20">
                                 <FundSearch
-                                    onAddFund={(code, name) => {
+                                    onAddFund={async (code, name) => {
                                         if (!watchlist.some(i => i.code === code)) {
-                                            setWatchlist([...watchlist, { code, name }]);
+                                            try {
+                                                const res = await fetch('/api/watchlist', {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: JSON.stringify({ code, name })
+                                                });
+                                                const data = await res.json();
+                                                if (data.success) {
+                                                    setWatchlist(prev => [...prev, { code, name }]);
+                                                    setSelectedFund(code);
+                                                }
+                                            } catch (err) {
+                                                console.error('Failed to add to watchlist:', err);
+                                            }
+                                        } else {
                                             setSelectedFund(code);
                                         }
                                     }}
@@ -272,12 +440,16 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                 {watchlist
                                     .slice() // Create a copy to avoid mutating state
                                     .sort((a, b) => {
-                                        // Sort by estimated_growth (descending)
+                                        if (sortOrder === 'none') return 0;
+
                                         // Funds without growth data go to the end
                                         if (a.estimated_growth === undefined && b.estimated_growth === undefined) return 0;
                                         if (a.estimated_growth === undefined) return 1;
                                         if (b.estimated_growth === undefined) return -1;
-                                        return b.estimated_growth - a.estimated_growth;
+
+                                        return sortOrder === 'desc'
+                                            ? b.estimated_growth - a.estimated_growth
+                                            : a.estimated_growth - b.estimated_growth;
                                     })
                                     .map(item => (
                                         <div

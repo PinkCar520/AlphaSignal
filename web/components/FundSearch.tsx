@@ -20,8 +20,7 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
     const [query, setQuery] = useState('');
     const [isOpen, setIsOpen] = useState(false);
     const [searchResults, setSearchResults] = useState<FundSearchResult[]>([]);
-    const [popularFunds, setPopularFunds] = useState<FundSearchResult[]>([]);
-    const [searchHistory, setSearchHistory] = useState<string[]>([]);
+    const [searchHistory, setSearchHistory] = useState<FundSearchResult[]>([]); // Store objects: {code, name, ...}
     const [activeIndex, setActiveIndex] = useState(-1);
     const [isLoading, setIsLoading] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
@@ -32,9 +31,18 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
     useEffect(() => {
         if (typeof window !== 'undefined') {
             try {
-                const history = localStorage.getItem('fund_search_history');
-                if (history) {
-                    setSearchHistory(JSON.parse(history));
+                // Try to load new format first
+                const historyV2 = localStorage.getItem('fund_search_history_v2');
+                if (historyV2) {
+                    setSearchHistory(JSON.parse(historyV2));
+                } else {
+                    // Fallback to legacy format (array of strings)
+                    const history = localStorage.getItem('fund_search_history');
+                    if (history) {
+                        const legacy = JSON.parse(history);
+                        // Convert to object format
+                        setSearchHistory(legacy.map((code: string) => ({ code, name: '最近搜索' })));
+                    }
                 }
             } catch (e) {
                 console.error('Failed to load search history:', e);
@@ -42,30 +50,20 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
         }
     }, []);
 
-    // Load popular funds on mount
-    useEffect(() => {
-        const loadPopularFunds = async () => {
-            try {
-                // Search for some popular fund codes to get initial data
-                const response = await fetch('/api/funds/search?q=混合&limit=10');
-                const data = await response.json();
-                if (data.results) {
-                    setPopularFunds(data.results.filter((f: FundSearchResult) => !existingCodes.includes(f.code)));
-                }
-            } catch (e) {
-                console.error('Failed to load popular funds:', e);
-            }
-        };
-        loadPopularFunds();
-    }, [existingCodes]);
-
     // Save search history to localStorage
-    const saveToHistory = (code: string) => {
-        const newHistory = [code, ...searchHistory.filter(c => c !== code)].slice(0, 5);
+    const saveToHistory = (fund: { code: string, name: string }) => {
+        // Remove existing if any
+        const filtered = searchHistory.filter(item => item.code !== fund.code);
+        // Add to front
+        const newHistory = [{
+            code: fund.code,
+            name: fund.name || '未命名基金'
+        }, ...filtered].slice(0, 5);
+
         setSearchHistory(newHistory);
         if (typeof window !== 'undefined') {
             try {
-                localStorage.setItem('fund_search_history', JSON.stringify(newHistory));
+                localStorage.setItem('fund_search_history_v2', JSON.stringify(newHistory));
             } catch (e) {
                 console.error('Failed to save search history:', e);
             }
@@ -73,53 +71,60 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
     };
 
     // Search logic with debouncing and request cancellation
-    useEffect(() => {
-        // Clear previous timeout
+    // Search function definition
+    const performSearch = async (searchTerm: string) => {
+        if (!searchTerm.trim()) {
+            setSearchResults([]);
+            setIsLoading(false);
+            return;
+        }
+
+        setIsLoading(true);
+        try {
+            const response = await fetch(
+                `/api/funds/search?q=${encodeURIComponent(searchTerm)}&limit=20`
+            );
+            const data = await response.json();
+            if (data.results) {
+                setSearchResults(data.results);
+            }
+        } catch (e) {
+            console.error('Search failed:', e);
+            setSearchResults([]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    // Manual debounce for input change
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const val = e.target.value;
+        setQuery(val);
+
+        // Clear existing timeout
         if (searchTimeoutRef.current) {
             clearTimeout(searchTimeoutRef.current);
         }
 
-        // Create AbortController for the effect
-        const controller = new AbortController();
-
-        if (query.trim()) {
-            // Set timeout for debounce
-            searchTimeoutRef.current = setTimeout(async () => {
-                setIsLoading(true); // Start loading only after debounce
-
-                try {
-                    const response = await fetch(
-                        `/api/funds/search?q=${encodeURIComponent(query)}&limit=20`,
-                        { signal: controller.signal }
-                    );
-                    const data = await response.json();
-                    if (!controller.signal.aborted && data.results) {
-                        const filtered = data.results.filter((f: FundSearchResult) => !existingCodes.includes(f.code));
-                        setSearchResults(filtered);
-                    }
-                } catch (e: any) {
-                    if (e.name !== 'AbortError') {
-                        console.error('Search failed:', e);
-                        setSearchResults([]);
-                    }
-                } finally {
-                    if (!controller.signal.aborted) {
-                        setIsLoading(false);
-                    }
-                }
-            }, 500); // Increased to 500ms for better experience
+        if (val.trim()) {
+            // Set new timeout
+            searchTimeoutRef.current = setTimeout(() => {
+                performSearch(val);
+            }, 800);
         } else {
             setSearchResults([]);
             setIsLoading(false);
         }
+    };
 
+    // Cleanup on unmount
+    useEffect(() => {
         return () => {
             if (searchTimeoutRef.current) {
                 clearTimeout(searchTimeoutRef.current);
             }
-            controller.abort(); // Cancel any pending request on cleanup
         };
-    }, [query, existingCodes]);
+    }, []);
 
     // Click outside to close
     useEffect(() => {
@@ -134,7 +139,8 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
 
     const handleSelect = (fund: FundSearchResult) => {
         onAddFund(fund.code, fund.name);
-        saveToHistory(fund.code);
+        // Save full object to history
+        saveToHistory({ code: fund.code, name: fund.name });
         setQuery('');
         setIsOpen(false);
         setActiveIndex(-1);
@@ -175,7 +181,7 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                 } else if (query.trim()) {
                     // Only direct add if no results and not loading
                     onAddFund(query.trim(), '');
-                    saveToHistory(query.trim());
+                    saveToHistory({ code: query.trim(), name: '自定义添加' });
                     setQuery('');
                     setIsOpen(false);
                 }
@@ -187,25 +193,15 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
         }
     };
 
+    // Removed popularFunds state
+
     const getRecommendations = (): FundSearchResult[] => {
-        // If no popular funds loaded yet, return empty
-        if (popularFunds.length === 0) {
+        if (searchHistory.length === 0) {
             return [];
         }
 
-        // 优先显示搜索历史对应的基金
-        const historyFunds = searchHistory
-            .map(code => popularFunds.find((f: FundSearchResult) => f.code === code))
-            .filter((f): f is FundSearchResult => f !== undefined)
-            .filter((f: FundSearchResult) => !existingCodes.includes(f.code));
-
-        // 然后显示热门基金
-        const remainingPopular = popularFunds
-            .filter((f: FundSearchResult) => !existingCodes.includes(f.code))
-            .filter((f: FundSearchResult) => !historyFunds.some(hf => hf.code === f.code))
-            .slice(0, 5 - historyFunds.length);
-
-        return [...historyFunds, ...remainingPopular];
+        // Filter out already added funds from history
+        return searchHistory.filter(f => !existingCodes.includes(f.code));
     };
 
     const displayItems = query ? searchResults : getRecommendations();
@@ -219,7 +215,7 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                     ref={inputRef}
                     type="text"
                     value={query}
-                    onChange={(e) => setQuery(e.target.value)}
+                    onChange={handleInputChange}
                     onFocus={() => setIsOpen(true)}
                     onKeyDown={handleKeyDown}
                     placeholder={placeholder}
@@ -282,17 +278,19 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                             <div className="py-1">
                                 {displayItems.map((fund, index) => {
                                     const isActive = index === activeIndex;
-                                    const isHistory = !query && searchHistory.includes(fund.code);
+                                    const isHistory = !query && searchHistory.some(h => h.code === fund.code);
+                                    const isAdded = existingCodes.includes(fund.code);
 
                                     return (
                                         <button
                                             key={fund.code}
-                                            onClick={() => handleSelect(fund)}
+                                            onClick={() => !isAdded && handleSelect(fund)}
                                             onMouseEnter={() => setActiveIndex(index)}
+                                            disabled={isAdded}
                                             className={`w-full px-3 py-2 text-left transition-colors ${isActive
                                                 ? 'bg-purple-500/20 border-l-2 border-purple-500'
                                                 : 'hover:bg-slate-800/50 border-l-2 border-transparent'
-                                                }`}
+                                                } ${isAdded ? 'opacity-50 cursor-not-allowed' : ''}`}
                                         >
                                             <div className="flex items-start justify-between gap-2">
                                                 <div className="flex-1 min-w-0">
@@ -302,6 +300,11 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                                                         </span>
                                                         {isHistory && (
                                                             <Clock className="w-3 h-3 text-slate-500 shrink-0" />
+                                                        )}
+                                                        {isAdded && (
+                                                            <span className="text-[10px] px-1.5 py-0.5 bg-slate-700 text-slate-400 rounded-full font-mono">
+                                                                已添加
+                                                            </span>
                                                         )}
                                                     </div>
                                                     <div className="flex items-center gap-2 mt-0.5">
@@ -326,7 +329,9 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                                                         )}
                                                     </div>
                                                 </div>
-                                                <Plus className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+                                                {!isAdded && (
+                                                    <Plus className="w-4 h-4 text-purple-400 shrink-0 mt-0.5" />
+                                                )}
                                             </div>
                                         </button>
                                     );
@@ -355,7 +360,7 @@ export default function FundSearch({ onAddFund, existingCodes, placeholder = '�
                             <button
                                 onClick={() => {
                                     onAddFund(query.trim(), '');
-                                    saveToHistory(query.trim());
+                                    saveToHistory({ code: query.trim(), name: '自定义添加' });
                                     setQuery('');
                                     setIsOpen(false);
                                 }}

@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+// import { Inter } from "next/font/google";
 import "../globals.css";
 import { NextIntlClientProvider } from 'next-intl';
 import { getMessages } from 'next-intl/server';
 
-const inter = Inter({ subsets: ["latin"] });
+// const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
     title: "AlphaSignal Dashboard",
@@ -27,7 +27,7 @@ export default async function LocaleLayout({
 
     return (
         <html lang={locale}>
-            <body className={inter.className}>
+            <body className="antialiased">
                 <NextIntlClientProvider messages={messages}>
                     {children}
                 </NextIntlClientProvider>

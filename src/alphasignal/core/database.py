@@ -125,6 +125,16 @@ class IntelligenceDB:
             """)
 
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fund_watchlist (
+                    user_id TEXT DEFAULT 'default',
+                    fund_code TEXT,
+                    fund_name TEXT,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, fund_code)
+                );
+            """)
+
+            cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_intelligence_timestamp ON intelligence(timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_intelligence_source_id ON intelligence(source_id);
             """)
@@ -135,7 +145,63 @@ class IntelligenceDB:
             logger.error(f"PostgreSQL Init Failed: {e}")
             # If DB init fails, we probably can't run. Let it raise or stay broken.
 
-    def update_outcome(self, record_id, price_1h=None, price_24h=None):
+    # ... (existing methods) ...
+
+    # --- Watchlist Methods ---
+
+    def add_to_watchlist(self, fund_code, fund_name, user_id='default'):
+        """Add a fund to the user's watchlist."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO fund_watchlist (user_id, fund_code, fund_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id, fund_code) DO UPDATE SET
+                    fund_name = EXCLUDED.fund_name,
+                    created_at = CURRENT_TIMESTAMP
+            """, (user_id, fund_code, fund_name))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Add to Watchlist Failed: {e}")
+            return False
+
+    def remove_from_watchlist(self, fund_code, user_id='default'):
+        """Remove a fund from the watchlist."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM fund_watchlist 
+                WHERE user_id = %s AND fund_code = %s
+            """, (user_id, fund_code))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Remove from Watchlist Failed: {e}")
+            return False
+
+    def get_watchlist(self, user_id='default'):
+        """Get all funds in the user's watchlist."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            cursor.execute("""
+                SELECT fund_code, fund_name, created_at 
+                FROM fund_watchlist 
+                WHERE user_id = %s 
+                ORDER BY created_at DESC
+            """, (user_id,))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Get Watchlist Failed: {e}")
+            return []
+
         """Update historical outcome data."""
         try:
             conn = self._get_conn()

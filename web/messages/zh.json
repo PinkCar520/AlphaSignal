@@ -111,6 +111,7 @@
     "tableChange": "涨跌幅",
     "tableWeight": "权重",
     "tableImpact": "贡献度",
+    "refreshWatchlist": "刷新列表",
     "selectFund": "请选择基金以查看估值"
   }
 }

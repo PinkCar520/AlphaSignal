@@ -15,6 +15,14 @@ const nextConfig: import("next").NextConfig = {
         source: '/api/stats',
         destination: 'http://api:8001/api/stats',
       },
+      {
+        source: '/api/watchlist/:path*',
+        destination: 'http://api:8001/api/watchlist/:path*',
+      },
+      {
+        source: '/api/funds/:path*',
+        destination: 'http://api:8001/api/funds/:path*',
+      },
     ];
   },
 };

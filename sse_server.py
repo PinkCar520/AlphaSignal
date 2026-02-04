@@ -133,8 +133,15 @@ async def get_fund_valuation(code: str):
     from src.alphasignal.core.fund_engine import FundEngine
     
     engine = FundEngine()
-    result = engine.calculate_realtime_valuation(code)
-    return result
+    # Use efficient batch method even for single fund
+    try:
+        results = engine.calculate_batch_valuation([code])
+        if results:
+            return results[0]
+        return {"error": "Valuation failed"}
+    except AttributeError:
+        # Fallback
+        return engine.calculate_realtime_valuation(code)
 
 @app.post("/api/funds/{code}/refresh")
 async def refresh_fund_holdings(code: str):
@@ -143,6 +150,70 @@ async def refresh_fund_holdings(code: str):
     engine = FundEngine()
     holdings = engine.update_fund_holdings(code)
     return {"status": "ok", "holdings_count": len(holdings)}
+
+@app.get("/api/funds/batch-valuation")
+async def get_batch_valuations(codes: str):
+    """
+    Get real-time valuations for multiple funds.
+    codes: Comma-separated list of fund codes.
+    """
+    import time
+    if not codes:
+        return {"data": []}
+    
+    code_list = [c.strip() for c in codes.split(',') if c.strip()]
+    if not code_list:
+        return {"data": []}
+
+    from src.alphasignal.core.fund_engine import FundEngine
+    engine = FundEngine()
+    
+    # Use optimized batch valuation
+    try:
+        results = engine.calculate_batch_valuation(code_list)
+        return {"data": results}
+    except AttributeError:
+        # Fallback if method missing (during partial reload)
+        results = []
+        for code in code_list[:20]:
+            try:
+                val = engine.calculate_realtime_valuation(code)
+                results.append(val)
+            except Exception as e:
+                results.append({"fund_code": code, "error": str(e)})
+        return {"data": results}
+    except Exception as e:
+        return {"data": [], "error": str(e)}
+
+# --- Watchlist APIs ---
+from pydantic import BaseModel
+
+class WatchlistItem(BaseModel):
+    code: str
+    name: str
+    user_id: str = 'default'
+
+@app.get("/api/watchlist")
+async def get_watchlist(user_id: str = 'default'):
+    from src.alphasignal.core.database import IntelligenceDB
+    db = IntelligenceDB()
+    rows = db.get_watchlist(user_id)
+    # Simplify response
+    return {"data": [{"code": r['fund_code'], "name": r['fund_name']} for r in rows]}
+
+@app.post("/api/watchlist")
+async def add_to_watchlist(item: WatchlistItem):
+    from src.alphasignal.core.database import IntelligenceDB
+    db = IntelligenceDB()
+    success = db.add_to_watchlist(item.code, item.name, item.user_id)
+    return {"success": success}
+
+@app.delete("/api/watchlist/{code}")
+async def remove_from_watchlist(code: str, user_id: str = 'default'):
+    from src.alphasignal.core.database import IntelligenceDB
+    db = IntelligenceDB()
+    success = db.remove_from_watchlist(code, user_id)
+    return {"success": success}
 
 @app.get("/api/funds/search")
 async def search_funds(q: str = "", limit: int = 20):
