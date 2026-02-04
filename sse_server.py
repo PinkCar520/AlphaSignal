@@ -185,6 +185,44 @@ async def get_batch_valuations(codes: str):
     except Exception as e:
         return {"data": [], "error": str(e)}
 
+@app.get("/api/funds/{code}/history")
+async def get_fund_history(code: str, limit: int = 30):
+    """Get historical valuation vs official performance for a fund."""
+    from src.alphasignal.core.database import IntelligenceDB
+    db = IntelligenceDB()
+    history = db.get_valuation_history(code, limit)
+    # Ensure date objects are serializable
+    formatted_history = []
+    for h in history:
+        item = dict(h)
+        if 'trade_date' in item and hasattr(item['trade_date'], 'isoformat'):
+            item['trade_date'] = item['trade_date'].isoformat()
+        formatted_history.append(item)
+    return {"data": formatted_history}
+
+@app.post("/api/admin/funds/snapshot")
+async def trigger_snapshot():
+    """Admin: Manually trigger 15:00 valuation snapshot."""
+    from src.alphasignal.core.fund_engine import FundEngine
+    engine = FundEngine()
+    engine.take_all_funds_snapshot()
+    return {"status": "snapshot_triggered"}
+
+@app.post("/api/admin/funds/reconcile")
+async def trigger_reconcile(date: str = None):
+    """Admin: Manually trigger official NAV reconciliation."""
+    from src.alphasignal.core.fund_engine import FundEngine
+    engine = FundEngine()
+    target_date = None
+    if date:
+        from datetime import datetime
+        try:
+            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD"}
+    engine.reconcile_official_valuations(target_date)
+    return {"status": "reconciliation_triggered", "date": str(target_date)}
+
 # --- Watchlist APIs ---
 from pydantic import BaseModel
 

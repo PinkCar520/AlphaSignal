@@ -701,3 +701,73 @@ class FundEngine:
             logger.error(f"Fund search fallback failed: {e}")
             return local_results
 
+    def take_all_funds_snapshot(self):
+        """Batch take snapshots for all funds in various users' watchlists."""
+        codes = self.db.get_watchlist_all_codes()
+        if not codes:
+            logger.info("No funds in watchlist to snapshot.")
+            return
+        
+        logger.info(f"📸 Starting 15:00 Valuation Snapshot for {len(codes)} funds...")
+        
+        # We can use batch valuation for speed
+        valuations = self.calculate_batch_valuation(codes)
+        
+        trade_date = datetime.now().date()
+        
+        count = 0
+        for val in valuations:
+            if 'error' in val: continue
+            
+            self.db.save_valuation_snapshot(
+                trade_date=trade_date,
+                fund_code=val['fund_code'],
+                est_growth=val['estimated_growth'],
+                components_json=val['components']
+            )
+            count += 1
+            
+        logger.info(f"✅ Successfully archived {count} snapshots for {trade_date}")
+
+    def reconcile_official_valuations(self, trade_date=None):
+        """Fetch real growth for a specific date and update the archive."""
+        if trade_date is None:
+            # Default to yesterday if it's morning, or today if it's late night
+            trade_date = (datetime.now() - timedelta(days=1)).date()
+            
+        # Get funds that have a snapshot but no official growth yet
+        # (Need a helper for this or just fetch all for that date)
+        # For simplicity, we fetch all for that date from archive
+        conn = self.db.get_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT fund_code FROM fund_valuation_archive WHERE trade_date = %s AND official_growth IS NULL", (trade_date,))
+                codes = [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+            
+        if not codes:
+            logger.info(f"No pending reconciliation for {trade_date}")
+            return
+
+        logger.info(f"⚖️ Starting Official Reconciliation for {len(codes)} funds on {trade_date}...")
+        
+        # Fetching official growth one by one or via a listing API
+        # Listing API is faster: ak.fund_open_fund_daily_em() gives today's growth for ALL funds
+        try:
+            df_all = ak.fund_open_fund_daily_em()
+            # Columns: 基金代码, 基金简称, 单位净值, 累计净值, 前一交易日-单位净值, 前一交易日-累计净值, 日增长率, ...
+            
+            count = 0
+            for _, row in df_all.iterrows():
+                code = str(row['基金代码'])
+                if code in codes:
+                    try:
+                        growth = float(row['日增长率'])
+                        self.db.update_official_nav(trade_date, code, growth)
+                        count += 1
+                    except: pass
+            
+            logger.info(f"✨ Successfully reconciled {count} funds for {trade_date}")
+        except Exception as e:
+            logger.error(f"Reconciliation Failed: {e}")

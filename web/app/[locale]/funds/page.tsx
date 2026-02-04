@@ -26,6 +26,14 @@ interface FundValuation {
     source?: string;
 }
 
+interface ValuationHistory {
+    trade_date: string;
+    frozen_est_growth: number;
+    official_growth: number;
+    deviation: number;
+    tracking_status: string;
+}
+
 interface WatchlistItem {
     code: string;
     name: string;
@@ -53,6 +61,10 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
 
     // Sorting state: 'desc' (default), 'asc', or 'none' (insertion order)
     const [sortOrder, setSortOrder] = useState<'desc' | 'asc' | 'none'>('desc');
+
+    const [activeTab, setActiveTab] = useState<'attribution' | 'history'>('attribution');
+    const [history, setHistory] = useState<ValuationHistory[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
 
 
     // Load selected fund preference from local storage (UI preference only)
@@ -236,12 +248,27 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
         }
     };
 
-    useEffect(() => {
-        if (selectedFund) {
-            fetchValuation(selectedFund);
+    const fetchHistory = async (code: string) => {
+        setHistoryLoading(true);
+        try {
+            const res = await fetch(`/api/funds/${code}/history`);
+            const json = await res.json();
+            if (json.data) {
+                setHistory(json.data);
+            }
+        } catch (err) {
+            console.error('Failed to fetch history:', err);
+        } finally {
+            setHistoryLoading(false);
         }
-    }, [selectedFund]);
+    };
 
+    // Auto-fetch valuation and history when selectedFund changes
+    useEffect(() => {
+        if (!selectedFund) return;
+        fetchValuation(selectedFund);
+        fetchHistory(selectedFund);
+    }, [selectedFund]);
 
 
 
@@ -589,51 +616,121 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                 </Card>
                             </div>
 
-                            {/* Attribution Table */}
+                            {/* Attribution & History Tabs */}
                             <Card
-                                title={t('attribution')}
+                                title={
+                                    <div className="flex items-center gap-4">
+                                        <button
+                                            onClick={() => setActiveTab('attribution')}
+                                            className={`pb-2 px-1 text-sm font-bold transition-all border-b-2 ${activeTab === 'attribution' ? 'border-blue-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                                        >
+                                            {t('attribution')}
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveTab('history')}
+                                            className={`pb-2 px-1 text-sm font-bold transition-all border-b-2 ${activeTab === 'history' ? 'border-blue-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                                        >
+                                            {t('valuationReview')}
+                                        </button>
+                                    </div>
+                                }
                                 className="flex-1 min-h-0 flex flex-col overflow-hidden"
                                 contentClassName="flex-1 min-h-0 flex flex-col p-0"
                             >
                                 <div className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar">
-                                    <table className="w-full text-left border-collapse text-sm">
-                                        <thead className="sticky top-0 bg-white z-10">
-                                            <tr className="border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider shadow-sm bg-slate-50/80 backdrop-blur">
-                                                <th className="p-3">{t('tableStock')}</th>
-                                                <th className="p-3 text-right">{t('tablePrice')}</th>
-                                                <th className="p-3 text-right">{t('tableChange')}</th>
-                                                <th className="p-3 text-right">{t('tableWeight')}</th>
-                                                <th className="p-3 text-right">{t('tableImpact')}</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody className="divide-y divide-slate-100">
-                                            {valuation.components
-                                                .slice() // Create a copy to avoid mutating
-                                                .sort((a, b) => b.weight - a.weight) // Sort by weight descending
-                                                .map(comp => (
-                                                    <tr key={comp.code} className="group hover:bg-slate-50 transition-colors">
-                                                        <td className="p-3">
-                                                            <div className="flex flex-col">
-                                                                <span className="font-bold text-slate-800">{comp.name}</span>
-                                                                <span className="text-[10px] font-mono text-slate-500">{comp.code}</span>
-                                                            </div>
-                                                        </td>
-                                                        <td className="p-3 text-right font-mono text-slate-600">
-                                                            {comp.price.toFixed(2)}
-                                                        </td>
-                                                        <td className={`p-3 text-right font-mono font-bold ${comp.change_pct >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                                                            {comp.change_pct > 0 ? "+" : ""}{comp.change_pct.toFixed(2)}%
-                                                        </td>
-                                                        <td className="p-3 text-right font-mono text-slate-500">
-                                                            {comp.weight.toFixed(2)}%
-                                                        </td>
-                                                        <td className={`p-3 text-right font-mono font-bold ${comp.impact >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
-                                                            {comp.impact > 0 ? "+" : ""}{comp.impact.toFixed(3)}%
-                                                        </td>
-                                                    </tr>
-                                                ))}
-                                        </tbody>
-                                    </table>
+                                    {activeTab === 'attribution' ? (
+                                        <table className="w-full text-left border-collapse text-sm">
+                                            <thead className="sticky top-0 bg-white z-10">
+                                                <tr className="border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider shadow-sm bg-slate-50/80 backdrop-blur">
+                                                    <th className="p-3">{t('tableStock')}</th>
+                                                    <th className="p-3 text-right">{t('tablePrice')}</th>
+                                                    <th className="p-3 text-right">{t('tableChange')}</th>
+                                                    <th className="p-3 text-right">{t('tableWeight')}</th>
+                                                    <th className="p-3 text-right">{t('tableImpact')}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-100">
+                                                {valuation.components
+                                                    .slice()
+                                                    .sort((a, b) => b.weight - a.weight)
+                                                    .map(comp => (
+                                                        <tr key={comp.code} className="group hover:bg-slate-50 transition-colors">
+                                                            <td className="p-3">
+                                                                <div className="flex flex-col">
+                                                                    <span className="font-bold text-slate-800">{comp.name}</span>
+                                                                    <span className="text-[10px] font-mono text-slate-500">{comp.code}</span>
+                                                                </div>
+                                                            </td>
+                                                            <td className="p-3 text-right font-mono text-slate-600">
+                                                                {comp.price.toFixed(2)}
+                                                            </td>
+                                                            <td className={`p-3 text-right font-mono font-bold ${comp.change_pct >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                {comp.change_pct > 0 ? "+" : ""}{comp.change_pct.toFixed(2)}%
+                                                            </td>
+                                                            <td className="p-3 text-right font-mono text-slate-500">
+                                                                {comp.weight.toFixed(2)}%
+                                                            </td>
+                                                            <td className={`p-3 text-right font-mono font-bold ${comp.impact >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                {comp.impact > 0 ? "+" : ""}{comp.impact.toFixed(3)}%
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                            </tbody>
+                                        </table>
+                                    ) : (
+                                        <div className="flex flex-col h-full">
+                                            {historyLoading ? (
+                                                <div className="flex-1 flex items-center justify-center py-12">
+                                                    <RefreshCw className="w-6 h-6 animate-spin text-slate-300" />
+                                                </div>
+                                            ) : history.length > 0 ? (
+                                                <table className="w-full text-left border-collapse text-sm">
+                                                    <thead className="sticky top-0 bg-white z-10">
+                                                        <tr className="border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider shadow-sm bg-slate-50/80 backdrop-blur">
+                                                            <th className="p-3">{t('tableDate')}</th>
+                                                            <th className="p-3 text-right">{t('tableEst')}</th>
+                                                            <th className="p-3 text-right">{t('tableOfficial')}</th>
+                                                            <th className="p-3 text-right">{t('tableDeviation')}</th>
+                                                            <th className="p-3 text-center">状态</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className="divide-y divide-slate-100">
+                                                        {history.map((h, i) => (
+                                                            <tr key={i} className="hover:bg-slate-50 transition-colors">
+                                                                <td className="p-3 font-mono text-slate-600">{h.trade_date}</td>
+                                                                <td className={`p-3 text-right font-mono font-bold ${h.frozen_est_growth >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                    {h.frozen_est_growth > 0 ? "+" : ""}{Number(h.frozen_est_growth).toFixed(2)}%
+                                                                </td>
+                                                                <td className={`p-3 text-right font-mono font-bold ${h.official_growth >= 0 ? 'text-rose-600' : 'text-emerald-600'}`}>
+                                                                    {h.official_growth > 0 ? "+" : ""}{Number(h.official_growth).toFixed(2)}%
+                                                                </td>
+                                                                <td className="p-3 text-right font-mono text-slate-500">
+                                                                    {h.deviation > 0 ? "+" : ""}{Number(h.deviation).toFixed(2)}%
+                                                                </td>
+                                                                <td className="p-3 text-center">
+                                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${h.tracking_status === 'S' ? 'bg-emerald-100 text-emerald-700' :
+                                                                        h.tracking_status === 'A' ? 'bg-blue-100 text-blue-700' :
+                                                                            h.tracking_status === 'B' ? 'bg-amber-100 text-amber-700' :
+                                                                                'bg-rose-100 text-rose-700'
+                                                                        }`}>
+                                                                        {t(`accuracy${h.tracking_status}`)}
+                                                                    </span>
+                                                                </td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            ) : (
+                                                <div className="flex-1 flex flex-col items-center justify-center py-12 text-slate-400">
+                                                    <div className="bg-slate-50 p-4 rounded-full mb-4">
+                                                        <Anchor className="w-8 h-8 opacity-20" />
+                                                    </div>
+                                                    <p className="text-sm font-medium">{t('noHistoryTitle')}</p>
+                                                    <p className="text-xs opacity-60 mt-1 uppercase tracking-tight">{t('noHistoryDesc')}</p>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
                             </Card>
                         </div>

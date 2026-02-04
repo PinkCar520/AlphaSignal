@@ -143,6 +143,24 @@ class IntelligenceDB:
                 CREATE INDEX IF NOT EXISTS idx_fund_pinyin ON fund_metadata (pinyin_shorthand);
             """)
 
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fund_valuation_archive (
+                    id SERIAL PRIMARY KEY,
+                    trade_date DATE NOT NULL,
+                    fund_code TEXT NOT NULL,
+                    frozen_est_growth NUMERIC(10, 4),
+                    frozen_components JSONB,
+                    official_growth NUMERIC(10, 4),
+                    deviation NUMERIC(10, 4),
+                    abs_deviation NUMERIC(10, 4),
+                    tracking_status VARCHAR(10),
+                    applied_bias_offset NUMERIC(10, 4) DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(trade_date, fund_code)
+                );
+                CREATE INDEX IF NOT EXISTS idx_archive_date_code ON fund_valuation_archive (trade_date, fund_code);
+            """)
+
             # Fund Managers
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS fund_managers (
@@ -931,4 +949,90 @@ class IntelligenceDB:
             return [dict(row) for row in rows]
         except Exception as e:
             logger.error(f"Search Funds Metadata Failed: {e}")
+            return []
+
+    def save_valuation_snapshot(self, trade_date, fund_code, est_growth, components_json):
+        """Save the 15:00 frozen snapshot of a fund valuation."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO fund_valuation_archive (trade_date, fund_code, frozen_est_growth, frozen_components)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (trade_date, fund_code) DO UPDATE SET
+                    frozen_est_growth = EXCLUDED.frozen_est_growth,
+                    frozen_components = EXCLUDED.frozen_components
+            """, (trade_date, fund_code, est_growth, Json(components_json)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Save Valuation Snapshot Failed: {e}")
+
+    def update_official_nav(self, trade_date, fund_code, official_growth):
+        """Reconcile official growth, calculate deviations and status."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            # 1. Update growth
+            cursor.execute("""
+                UPDATE fund_valuation_archive
+                SET official_growth = %s
+                WHERE trade_date = %s AND fund_code = %s
+                RETURNING frozen_est_growth
+            """, (official_growth, trade_date, fund_code))
+            
+            row = cursor.fetchone()
+            if row and row[0] is not None:
+                est = float(row[0])
+                off = float(official_growth)
+                dev = est - off
+                abs_dev = abs(dev)
+                
+                # Grade the accuracy
+                # S: < 0.2%, A: < 0.5%, B: < 1.0%, C: > 1.0%
+                status = 'S'
+                if abs_dev >= 1.0: status = 'C'
+                elif abs_dev >= 0.5: status = 'B'
+                elif abs_dev >= 0.2: status = 'A'
+                
+                cursor.execute("""
+                    UPDATE fund_valuation_archive
+                    SET deviation = %s, abs_deviation = %s, tracking_status = %s
+                    WHERE trade_date = %s AND fund_code = %s
+                """, (dev, abs_dev, status, trade_date, fund_code))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Update Official NAV Failed: {e}")
+
+    def get_valuation_history(self, fund_code, limit=30):
+        """Fetch historical valuation performance for UI charts."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor(cursor_factory=DictCursor)
+            cursor.execute("""
+                SELECT trade_date, frozen_est_growth, official_growth, deviation, tracking_status
+                FROM fund_valuation_archive
+                WHERE fund_code = %s AND official_growth IS NOT NULL
+                ORDER BY trade_date DESC
+                LIMIT %s
+            """, (fund_code, limit))
+            rows = cursor.fetchall()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Get Valuation History Failed: {e}")
+            return []
+
+    def get_watchlist_all_codes(self):
+        """Internal helper to get all unique codes across all users for batch snapshots."""
+        try:
+            conn = self._get_conn()
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT fund_code FROM fund_watchlist")
+            codes = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return codes
+        except Exception as e:
+            logger.error(f"Get Watchlist All Codes Failed: {e}")
             return []

@@ -1,7 +1,7 @@
 import React from 'react';
 
-interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  title?: string;
+interface CardProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'title'> {
+  title?: React.ReactNode;
   action?: React.ReactNode;
   contentClassName?: string;
 }
@@ -17,7 +17,7 @@ export function Card({ className = '', title, action, children, contentClassName
     >
       {(title || action) && (
         <div className="px-5 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-          {title && <h3 className="font-semibold text-slate-800 tracking-tight">{title}</h3>}
+          {title && <div className="font-semibold text-slate-800 tracking-tight">{title}</div>}
           {action && <div>{action}</div>}
         </div>
       )}
