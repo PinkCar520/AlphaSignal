@@ -1,4 +1,4 @@
-FROM node:25-alpine AS base
+FROM node:22-alpine AS base
 
 # Install dependencies only when needed
 FROM base AS deps
@@ -18,10 +18,13 @@ COPY . .
 
 # Next.js collects completely anonymous telemetry data about general usage.
 # Learn more here: https://nextjs.org/telemetry
-# Uncomment the following line in case you want to disable telemetry during the build.
 ENV NEXT_TELEMETRY_DISABLED=1
+# Increase memory limit for Node.js build process to prevent hangs
+ENV NODE_OPTIONS="--max-old-space-size=2048"
+# Skip Sentry sourcemap upload during Docker build to avoid connectivity/auth hangs
+ENV SENTRY_SKIP_SOURCE_MAP_UPLOAD=true
 
-RUN npm run build --verbose
+RUN npm run build
 
 # Production image, copy all the files and run next
 FROM base AS runner

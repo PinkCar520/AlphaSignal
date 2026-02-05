@@ -42,6 +42,5 @@ export default withSentryConfig(
 
     // Additional configurations
     widenClientFileUpload: true,
-    disableLogger: true,
   }
 );
