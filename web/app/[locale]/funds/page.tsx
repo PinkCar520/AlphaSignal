@@ -76,7 +76,7 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
     // Sorting state: 'desc' (default), 'asc', or 'none' (insertion order)
     const [sortOrder, setSortOrder] = useState<'desc' | 'asc' | 'none'>('desc');
 
-    const [activeTab, setActiveTab] = useState<'attribution' | 'history'>('attribution');
+    const [activeTab, setActiveTab] = useState<'attribution' | 'sector' | 'history'>('attribution');
     const [history, setHistory] = useState<ValuationHistory[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
 
@@ -631,6 +631,7 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                             </div>
 
                             {/* Attribution & History Tabs */}
+                            {/* Attribution & History Tabs */}
                             <Card
                                 title={
                                     <div className="flex items-center gap-4">
@@ -639,6 +640,12 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                             className={`pb-2 px-1 text-sm font-bold transition-all border-b-2 ${activeTab === 'attribution' ? 'border-blue-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
                                         >
                                             {t('attribution')}
+                                        </button>
+                                        <button
+                                            onClick={() => setActiveTab('sector')}
+                                            className={`pb-2 px-1 text-sm font-bold transition-all border-b-2 ${activeTab === 'sector' ? 'border-blue-600 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+                                        >
+                                            {t('sectorAttribution')}
                                         </button>
                                         <button
                                             onClick={() => setActiveTab('history')}
@@ -652,15 +659,8 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                 contentClassName="flex-1 min-h-0 flex flex-col p-0"
                             >
                                 <div className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar">
-                                    {activeTab === 'attribution' ? (
+                                    {activeTab === 'attribution' && (
                                         <div className="flex flex-col h-full">
-                                            {/* Sector Attribution Chart */}
-                                            {valuation.sector_attribution && (
-                                                <div className="px-3 pb-4">
-                                                    <SectorAttribution data={valuation.sector_attribution} />
-                                                </div>
-                                            )}
-
                                             <table className="w-full text-left border-collapse text-sm">
                                                 <thead className="sticky top-0 bg-white z-10">
                                                     <tr className="border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider shadow-sm bg-slate-50/80 backdrop-blur">
@@ -700,7 +700,17 @@ export default function FundDashboard({ params }: { params: Promise<{ locale: st
                                                 </tbody>
                                             </table>
                                         </div>
-                                    ) : (
+                                    )}
+
+                                    {activeTab === 'sector' && (
+                                        <div className="flex flex-col h-full p-4">
+                                            {valuation.sector_attribution && (
+                                                <SectorAttribution data={valuation.sector_attribution} />
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {activeTab === 'history' && (
                                         <div className="flex flex-col h-full">
                                             {historyLoading ? (
                                                 <div className="flex-1 flex items-center justify-center py-12">

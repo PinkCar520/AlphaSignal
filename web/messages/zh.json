@@ -105,14 +105,14 @@
     "basedOn": "基于 {count} 只重仓股 (权重 {weight}%)",
     "lastUpdated": "最后更新: {time}",
     "topDrivers": "领涨/领跌",
-    "attribution": "持仓归因分析",
+    "attribution": "个股归因",
     "tableStock": "股票",
     "tablePrice": "价格",
-    "tableChange": "涨跌幅",
-    "tableWeight": "权重",
-    "tableImpact": "贡献度",
+    "tableChange": "期间收益",
+    "tableWeight": "持仓占比",
+    "tableImpact": "拉动点数",
     "refreshWatchlist": "同步持仓数据",
-    "valuationReview": "估值复盘与对账",
+    "valuationReview": "净值回溯",
     "tableDate": "交易日期",
     "tableEst": "盘中估算",
     "tableOfficial": "官方实盘",
@@ -139,7 +139,11 @@
     "sortDesc": "涨幅: 从高到低",
     "refreshData": "刷新数据",
     "sourceLabel": "数据来源: {source}",
-    "sectorAttribution": "板块归因分析",
-    "byShenwanL1": "申万一级行业分类"
+    "sectorAttribution": "行业归因",
+    "byShenwanL1": "行业配置",
+    "performanceAttribution": "业绩归因",
+    "portfolio": "投资组合",
+    "sizeIsWeight": "面积 = 持仓占比",
+    "colorIsImpact": "颜色 = 拉动点数"
   }
 }
